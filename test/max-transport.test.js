@@ -394,6 +394,8 @@ test('owner opts one group into public MiniMax commands without opening personal
   assert.match(request.messages[1].content, /черновик поста/);
   assert.equal(request.tools, undefined);
   assert.ok(apiCalls.some((call) => call.url.includes('/messages?chat_id=-820') && call.body.text === 'ok'));
+  await dispatch('group-opt-next', '/ask Следующий вопрос');
+  assert.equal(modelCalls().length, 2);
   await dispatch('group-opt-off', '/group off', 42);
   assert.equal(kvGet('max_group_assistant:-820'), false);
   assert.equal(kvGet('owner_max_chat_id'), '42');

@@ -516,7 +516,7 @@ async function tryPair(chatId, userId, payload) {
 
 // The entry point of every event, from webhook and from long polling.
 const groupWorking = new Map();
-const groupCooldown = new Map();
+const groupNotices = new Map();
 let groupRestarting = false;
 export const activeGroupCount = () => groupWorking.size;
 export const beginGroupRestart = () => { groupRestarting = true; };
@@ -524,6 +524,13 @@ function stopGroupWork() {
   for (const controller of groupWorking.values()) controller.abort();
 }
 onAllStopped(stopGroupWork);
+async function groupNotice(chatId, notice, background) {
+  if (Date.now() < (groupNotices.get(chatId) || 0)) return;
+  groupNotices.set(chatId, Date.now() + 10000);
+  if (groupNotices.size > 100) groupNotices.delete(groupNotices.keys().next().value);
+  if (background) void send(chatId, notice).catch(() => {});
+  else await send(chatId, notice);
+}
 
 async function handleGroupCommand(message, chatId, isOwner, background) {
   const text = message.body?.text?.trim() || '';
@@ -546,11 +553,16 @@ async function handleGroupCommand(message, chatId, isOwner, background) {
     await send(chatId, 'Напишите /ask и вопрос или /post и тему для черновика. Для поиска используйте публичные сведения.');
     return true;
   }
-  if (isPaused() || groupRestarting || groupWorking.size >= 2 || groupWorking.has(chatId) || Date.now() < (groupCooldown.get(chatId) || 0)) return true;
+  if (isPaused() || groupRestarting) {
+    await groupNotice(chatId, 'Помощник сейчас приостановлен или перезапускается. Попробуйте позже.', background);
+    return true;
+  }
+  if (groupWorking.size >= 2 || groupWorking.has(chatId)) {
+    await groupNotice(chatId, 'Сейчас обрабатываю другие запросы. Попробуйте ещё раз через несколько секунд.', background);
+    return true;
+  }
   const controller = new AbortController();
   groupWorking.set(chatId, controller);
-  groupCooldown.set(chatId, Date.now() + 20000);
-  if (groupCooldown.size > 100) groupCooldown.delete(groupCooldown.keys().next().value);
   const work = async () => {
     try {
       void typing(chatId);
