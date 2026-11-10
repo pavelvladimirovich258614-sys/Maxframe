@@ -56,40 +56,60 @@ confidence: насколько ты уверен в действии.
 // A burst of messages is collected before it becomes a card: a person who
 // writes three lines in a row should cost one model call and one card, not
 // three of each. The window is short, so the answer still feels immediate.
+//
+// The collected messages live in the database (inbox_raw), not in memory: a
+// crash in the middle of the window must not lose them, and the id of the
+// message protects from the repeated delivery.
 const BURST_MS = config.inbox?.burstMs || 2500;
-const bursts = new Map(); // chat_id -> { items: [], timer }
+const bursts = new Map(); // chat_id -> timer
 
-async function flushBurst(chat, burst) {
-  const items = burst.items;
-  if (!items.length) return;
-  const last = items[items.length - 1];
-  const isGroup = items[0].chatType === 'chat' || items[0].chatType === 'channel';
+async function flushChat(chat) {
+  const rows = all('SELECT * FROM inbox_raw WHERE chat_id = ? AND inbox_id IS NULL ORDER BY id', chat);
+  if (!rows.length) return;
+  const last = rows[rows.length - 1];
+  const isGroup = rows[0].chat_type === 'chat' || rows[0].chat_type === 'channel';
   const source = isGroup ? 'group' : 'max';
-  const text = items
+  const text = rows
     .map((m) => (isGroup && m.name ? `${m.name}: ${m.text}` : m.text))
     .join('\n')
     .slice(0, 4000);
-  const meta = JSON.stringify({ chatType: items[0].chatType, title: items[0].chatTitle, lastSender: last.name });
+  const meta = JSON.stringify({ chatType: rows[0].chat_type, title: rows[0].chat_title, lastSender: last.name });
   const contact = get('SELECT * FROM contacts WHERE chat_id = ?', chat);
   const res = run(
     'INSERT INTO inbox (source, chat_id, name, username, text, last_message_id, external_id, meta, status, project_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    source, chat, last.name || items[0].chatTitle || '', last.username || null, text, last.externalId || null, last.externalId || null, meta,
+    source, chat, last.name || rows[0].chat_title || '', last.username || null, text, last.external_id || null, last.external_id || null, meta,
     'new', contact?.project_id ?? null, now(), now(),
   );
   const id = Number(res.lastInsertRowid);
+  // The collected messages are marked as used: the card is their place now.
+  run('UPDATE inbox_raw SET inbox_id = ? WHERE chat_id = ? AND inbox_id IS NULL', id, chat);
   bus.change('inbox', id);
   addLog('inbox', `${last.name || chat}: ${text.slice(0, 150)}`);
   await classify(id);
 }
 
-// Everything that was collected but not yet turned into a card: it is flushed
-// before the service stops, so a restart does not swallow the last messages.
+function scheduleFlush(chat) {
+  if (bursts.has(chat)) return;
+  const timer = setTimeout(() => {
+    bursts.delete(chat);
+    flushChat(chat).catch((e) => addLog('error', `Входящие: ${e.message}`));
+  }, BURST_MS);
+  timer.unref?.();
+  bursts.set(chat, timer);
+}
+
+// Everything that was collected but not yet turned into a card: it is turned
+// into cards before the service stops, so a restart does not swallow the last
+// messages.
 export async function flushBursts() {
-  const pending = [...bursts.values()];
-  bursts.clear();
-  for (const [chat, burst] of pending) {
-    clearTimeout(burst.timer);
-    await flushBurst(chat, burst).catch((e) => addLog('error', `Входящие: ${e.message}`));
+  const chats = all('SELECT DISTINCT chat_id FROM inbox_raw WHERE inbox_id IS NULL').map((r) => r.chat_id);
+  for (const chat of chats) {
+    const timer = bursts.get(chat);
+    if (timer) {
+      clearTimeout(timer);
+      bursts.delete(chat);
+    }
+    await flushChat(chat).catch((e) => addLog('error', `Входящие: ${e.message}`));
   }
 }
 
@@ -98,26 +118,18 @@ export async function handleMaxMessage({ chatId, text, name, username, externalI
   if (!chat) return;
   const contact = get('SELECT * FROM contacts WHERE chat_id = ?', chat);
   if (contact?.mode === 'ignore') return;
-  // MAX repeats a delivery it could not confirm; the same message must not
-  // create a second card.
-  if (externalId && get('SELECT id FROM inbox WHERE source IN (?, ?) AND external_id = ?', 'max', 'group', externalId)) return;
   if (!text || !String(text).trim()) return;
   if (!contact) {
     run('INSERT INTO contacts (chat_id, name, username, updated_at) VALUES (?, ?, ?, ?)', chat, name || chatTitle || '', username || null, now());
   }
-
-  const burst = bursts.get(chat) || { items: [], timer: null };
-  // The same delivery may arrive twice before the burst is turned into a card.
-  if (externalId && burst.items.some((m) => m.externalId === externalId)) return;
-  burst.items.push({ text: String(text), name, username, externalId, chatType, chatTitle });
-  if (!burst.timer) {
-    burst.timer = setTimeout(() => {
-      bursts.delete(chat);
-      flushBurst(chat, burst).catch((e) => addLog('error', `Входящие: ${e.message}`));
-    }, BURST_MS);
-    burst.timer.unref?.();
-  }
-  bursts.set(chat, burst);
+  // The id of the message protects from the repeated delivery: the same
+  // message is written only once.
+  const res = run(
+    'INSERT OR IGNORE INTO inbox_raw (chat_id, external_id, name, username, text, chat_type, chat_title, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    chat, externalId || null, name || null, username || null, String(text), chatType, chatTitle, now(),
+  );
+  if (!res.changes) return;
+  scheduleFlush(chat);
 }
 
 export async function classify(id) {

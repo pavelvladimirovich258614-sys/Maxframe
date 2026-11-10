@@ -197,7 +197,9 @@ export async function listMessages(chatId, { count = 50, after, before } = {}) {
   return list.map(normalize).reverse();
 }
 
-export const getMessagesAfter = (chatId, afterId, count = 50) => listMessages(chatId, { count, after: afterId });
+// The messages after a moment in time. The API takes `after` as a timestamp
+// (Unix seconds), not as an id of a message.
+export const getMessagesAfter = (chatId, afterTs, count = 50) => listMessages(chatId, { count, after: afterTs });
 
 export async function getChat(chatId) {
   const client = maxApi();

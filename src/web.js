@@ -244,13 +244,17 @@ route('POST', '/api/upload', ({ body }) => {
 const listSessions = () => agent.sessions || agent.claudeSessions;
 route('GET', '/api/claude-sessions', ({ url }) => listSessions()(Math.min(1000, Number(url.searchParams.get('limit')) || 60)));
 route('GET', '/api/sessions', ({ url }) => listSessions()(Math.min(1000, Number(url.searchParams.get('limit')) || 60)));
-route('POST', '/api/claude-sessions/attach', ({ body }) => {
+// The name of the route is kept from the times of Claude Code, so that the old
+// dashboard keeps working. The sessions themselves are the projects now.
+const attachSession = ({ body }) => {
   const existing = get('SELECT id FROM projects WHERE session_id = ?', body.sessionId);
   if (existing) return { id: existing.id };
   const res = run('INSERT INTO projects (name, cwd, session_id, created_at) VALUES (?, ?, ?, ?)', (body.name || 'Сессия').slice(0, 60), body.cwd || config.workspaceDir, body.sessionId, now());
   bus.change('project');
   return { id: Number(res.lastInsertRowid) };
-});
+};
+route('POST', '/api/claude-sessions/attach', attachSession);
+route('POST', '/api/sessions/attach', attachSession);
 
 // Social: the live MAX channel plus the latest Metricool report.
 route('GET', '/api/social', async ({ url }) => {

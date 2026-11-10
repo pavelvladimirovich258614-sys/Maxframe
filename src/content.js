@@ -30,10 +30,13 @@ const DIRECT = new Set(['max', 'linkedin']);
 // The network of a post. The posts made before the move to MAX lie in the base with the old
 // key, and such a post belongs to the channel: an unknown network is read as the channel.
 const netKey = (network) => (NETWORKS[network] ? network : 'max');
-// MAX does not give the views and the reactions of a message, so the analysis of the posts
-// can count the formats and the lengths, but cannot rank the posts by reach.
+// The views of a message come with the channel post, but only to a bot with the
+// view_stats permission. The reactions the Bot API does not give.
 const hasMedia = (text) => /\[(фото|видео|голосовое|файл|стикер|контакт|геометка)/i.test(String(text || ''));
-const contentModel = () => process.env.CONTENT_MODEL || 'sonnet';
+// The model of the studio. The default is the dispatch model of MiniMax: a name
+// of another provider (for example "sonnet") would be rejected by the API with
+// a parameter error, and the studio would silently stop working.
+export const contentModel = () => process.env.CONTENT_MODEL || config.minimax.dispatchModel;
 const change = () => bus.change('content');
 const day = (t = Date.now()) => { const d = new Date(t); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 export const trackedLink = (network, track) => `${config.owner.siteUrl}?utm_source=${network}&utm_campaign=mf&utm_content=${track}`;
@@ -261,8 +264,9 @@ export async function refreshIdeas() {
   change();
   try {
     const ch = await channelStats().catch(() => null);
-    // There are no views in MAX, so the longest posts of the channel are taken as the base.
-    const top = (ch?.posts || []).filter((p) => p.text).sort((a, b) => b.text.length - a.text.length).slice(0, 5);
+    // The style examples are the posts of the channel: the longest ones are taken
+    // as the base (the views are only known for the channels the bot owns).
+    const top = (ch?.posts || []).filter((p) => p.text).sort((a, b) => (b.views ?? -1) - (a.views ?? -1) || b.text.length - a.text.length).slice(0, 5);
     const questions = (await botMessages().catch(() => [])).filter((m) => /^Вопрос от/.test(m.text)).slice(0, 15).map((m) => m.text.slice(0, 300));
     const thoughts = all("SELECT prompt FROM runs WHERE origin = 'bot' AND started_at > ? ORDER BY id DESC LIMIT 40", Date.now() - 14 * 86400000)
       .map((r) => r.prompt.replace(/\s+/g, ' ').slice(0, 250)).filter((t) => t.length > 40);
@@ -428,6 +432,9 @@ export async function competitorStats() {
         ...c, username: id, chat_id: id, url: chat?.link || null,
         subscribers: chat?.participants_count ?? null,
         posts7: posts.length, avgViews,
+        // Whether the views of this channel are visible to the bot. They are
+        // only for the channels the bot owns (the view_stats permission).
+        viewsKnown: seen.length > 0,
         top: [...posts].sort((a, b) => (b.views ?? -1) - (a.views ?? -1)).slice(0, 3),
       });
     } catch (e) { items.push({ ...c, username: id, chat_id: id, url: null, error: e.message.slice(0, 120), top: [] }); }
@@ -480,9 +487,11 @@ export async function autoFromRivals(max = 2) {
           .filter((p) => p.at > Date.now() - 7 * 86400000);
         for (const p of posts) {
           const age = Date.now() - p.at;
-          // A fresh and substantial post is the signal here. When the views of
-          // the channel are visible, the reach of the post is the better
-          // signal, and a post nobody saw is skipped.
+          // Свежий и объёмный пост - главный сигнал здесь. Просмотры MAX
+          // отдаёт только владельцу канала, поэтому у чужих каналов их нет:
+          // там отбор идёт по свежести и объёму, и это не равноценная замена
+          // отбора по просмотрам. Где просмотры видны, пост без просмотров
+          // пропускается.
           if (age < 4 * 3600000 || age > 48 * 3600000 || p.text.length < 250 || AD_RE.test(p.text)) continue;
           if (typeof p.views === 'number' && p.views <= 0) continue;
           const key = `${id}:${p.id}`;
@@ -502,7 +511,7 @@ export async function autoFromRivals(max = 2) {
     }
     let added = 0;
     for (const cnd of picked) {
-      const prompt = `Повод для поста владельца: свежий большой пост в похожем канале «${cnd.channel}» от ${new Date(cnd.at).toLocaleString('ru')}. Значит, тема сейчас интересна аудитории.
+      const prompt = `Повод для поста владельца: свежий большой пост в похожем канале «${cnd.channel}» от ${new Date(cnd.at).toLocaleString('ru')}. Тема сейчас свежая. Охвата этого поста мы не знаем: просмотры чужих каналов боту недоступны, поэтому свежесть здесь единственный сигнал.
 
 Чужой пост (это только повод, не пересказывай его и не бери оттуда формулировки):
 """

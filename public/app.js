@@ -55,7 +55,7 @@ const icon = (name) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const $ = (sel, root = document) => root.querySelector(sel);
 const initials = (name) => ((name || '').match(/[\p{L}\p{N}]+/gu) || ['?']).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
-// Minimal markdown for Claude's replies: headings, bold, inline code, bullets. Input is escaped first.
+// Minimal markdown for the replies of the model: headings, bold, inline code, bullets. Input is escaped first.
 const md = (s) => esc(s)
   .replace(/^#{1,4} (.+)$/gm, '<b>$1</b>')
   .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
@@ -322,7 +322,7 @@ function renderShell() {
   const st = S.state;
   if (!st) return;
   const rows = [
-    ['Claude', st.authError ? 'bad' : 'ok', st.authError ? 'нужен вход' : 'на связи'],
+    ['MiniMax', st.authError ? 'bad' : 'ok', st.authError ? 'нужен ключ' : 'на связи'],
     ['MAX', !st.max?.enabled ? '' : st.max.connected ? 'ok' : st.max.error ? 'bad' : 'warn', !st.max?.enabled ? 'не настроен' : st.max.mode || '—'],
     ['Бот', !st.bot.configured ? '' : st.bot.status === 'running' ? 'ok' : 'bad', !st.bot.configured ? 'не настроен' : st.bot.username ? `@${st.bot.username}` : st.bot.status],
     ['Работает', st.running.length ? 'live' : '', st.running.length ? `${st.running.length} сесс.` : 'тихо'],
@@ -337,7 +337,7 @@ function renderBanner() {
   const st = S.state;
   const parts = [];
   if (st?.authError) {
-    parts.push(`<div class="banner bad">${icon('system')}<div><b>Claude не авторизован</b>Сессии не запустятся, пока не войдёшь в аккаунт. На Mac в терминале выполни <span class="kbd">claude auth login</span> и нажми «Проверить». Для работы 24/7 лучше <span class="kbd">claude setup-token</span>, а токен вписать в .env как CLAUDE_CODE_OAUTH_TOKEN.</div><button class="btn small" data-action="clear-auth">Проверить</button></div>`);
+    parts.push(`<div class="banner bad">${icon('system')}<div><b>MiniMax не отвечает</b>Сессии не запустятся, пока не задан ключ. Впиши в <span class="kbd">.env</span> строку <span class="kbd">MINIMAX_API_KEY=...</span> (ключ на platform.minimax.io, международный регион) и перезапусти мейнфрейм.${st.authError?.message ? ` Ошибка: ${esc(String(st.authError.message).slice(0, 200))}` : ''}</div><button class="btn small" data-action="clear-auth">Проверить</button></div>`);
   }
   if (st?.paused) parts.push(`<div class="banner warn">${icon('stop')}<div><b>Автоматика на паузе</b>Входящие собираются, но ничего не отправляется само и задачи по расписанию пропускаются.</div><button class="btn small" data-action="resume">Включить</button></div>`);
   $('#banner').innerHTML = parts.join('');
@@ -535,7 +535,7 @@ function viewSessions() {
   const p = projects.find((x) => x.id === S.project);
   const running = p?.running;
   const list = `<div class="plist-wrap">
-    <div class="row" style="margin-bottom:10px"><button class="btn primary small" data-action="new-project">${icon('plus')}Проект</button><button class="btn small" data-action="attach">${icon('link')}Из Claude Code</button></div>
+    <div class="row" style="margin-bottom:10px"><button class="btn primary small" data-action="new-project">${icon('plus')}Проект</button><button class="btn small" data-action="attach">${icon('link')}Из сессии</button></div>
     <div class="plist">${projects.map((x) => `<button class="pitem ${x.id === S.project ? 'active' : ''}" data-project="${x.id}">
       <span class="dot ${x.running ? 'live' : x.last?.status === 'error' ? 'bad' : x.session_id ? 'ok' : ''}"></span>
       <span class="grow"><span class="pitem-name">${esc(x.name)}</span><span class="pitem-sub" style="display:block">${esc(x.last?.prompt ? x.last.prompt.slice(0, 70) : shortPath(x.cwd))}</span></span>
@@ -556,12 +556,12 @@ function viewSessions() {
       <textarea class="input" name="prompt" rows="1" placeholder="Задача для «${esc(p.name)}». Скриншот можно вставить ⌘V"></textarea>
       <button class="btn primary" type="submit" aria-label="Отправить">${icon('send')}</button>
     </form>
-  </section></div>` : `<div class="card"><div class="empty"><div class="em-title">Нет проектов</div>Создай проект или подключи сессию Claude Code.</div></div>`;
+  </section></div>` : `<div class="card"><div class="empty"><div class="em-title">Нет проектов</div>Создай проект или подключи чужую сессию.</div></div>`;
 
   const nRunning = (S.state?.running || []).length;
   const last = projects.filter((x) => x.last).sort((a, b) => b.last.started_at - a.last.started_at)[0];
   const top = S.detail ? '' : hero({
-    label: 'Сессии Claude Code', tone: 'violet',
+    label: 'Сессии', tone: 'violet',
     value: nRunning ? `${plural(nRunning, 'работает', 'работают', 'работают')} сейчас` : 'Все свободны',
     note: last ? `последняя активность ${when(last.last.started_at)}` : '',
     tiles: [
@@ -570,12 +570,12 @@ function viewSessions() {
       ...(last ? [{ icon: '🕐', title: esc(last.name), sub: esc((last.last.prompt || '').slice(0, 60)) }] : []),
     ],
   });
-  return `${top}<div class="page-head"><div><h1>Сессии</h1><p>Каждый проект это своя папка и своя сессия Claude Code.</p></div></div>
+  return `${top}<div class="page-head"><div><h1>Сессии</h1><p>Каждый проект это своя папка и своя сессия исполнителя.</p></div></div>
     <div class="split ${S.detail ? 'detail' : ''}">${list}${chat}</div>`;
 }
 
 const ORIGIN = { ui: 'из мейнфрейма', bot: 'из бота', cron: 'по расписанию', inbox: 'из MAX' };
-// Like Claude Code: the request, one folded "steps" line (tools and thinking-out-loud), the answer.
+// The request, one folded line of steps (tools and reasoning), and the answer.
 const toolName = (n) => String(n || '').replace(/^mcp__/, '').replace(/^claude_ai_/, '').replace(/__/g, ' · ');
 function stepsBlock(key, steps, { live = false, took = '' } = {}) {
   if (!steps.length && !live) return '';
@@ -610,14 +610,14 @@ function pastBlock(hasRuns = true) {
     if (m.role === 'user') { flush(i); out.push(`<div class="bubble me"><span class="clamp" style="--lines:8">${esc(m.text)}</span></div>`); } else group.push(m);
   });
   flush('end');
-  return `<div class="past"><div class="run-sep">Раньше в этой сессии · из терминала или приложения Claude</div>${more}${out.join('')}
+  return `<div class="past"><div class="run-sep">Раньше в этой сессии · из терминала или приложения</div>${more}${out.join('')}
     ${hasRuns ? '<div class="run-sep">дальше: из мейнфрейма</div>' : ''}</div>`;
 }
 
 function chatBody() {
   const runs = S.data.timeline || [];
   if (!runs.length && S.past[S.project]?.items?.length) return pastBlock(false);
-  if (!runs.length) return `<div class="empty"><div class="em-icon">${icon('sessions')}</div><div class="em-title">Сессия пустая</div>Напиши задачу внизу. Claude работает в папке проекта с полными правами.</div>`;
+  if (!runs.length) return `<div class="empty"><div class="em-icon">${icon('sessions')}</div><div class="em-title">Сессия пустая</div>Напиши задачу внизу. Исполнитель работает в папке проекта с полными правами.</div>`;
   return pastBlock() + runs.map((r) => {
     const out = [`<div class="run-sep">${when(r.started_at)}</div>`];
     out.push(`<div class="bubble me"><span class="origin">${ORIGIN[r.origin] || r.origin}</span>${esc(r.prompt)}</div>`);
@@ -753,7 +753,7 @@ function socialOverview() {
     </section>` : `<section class="card"><div class="empty">${esc(d.channelError || 'MAX-канал не подключён')}</div></section>`;
 
   const r = d.report;
-  const report = !r ? `<section class="card raised"><div class="empty"><div class="em-icon">${icon('chart')}</div><div class="em-title">Сводки из Metricool ещё нет</div>Нажми «Обновить сводку»: сессия соберёт цифры по Instagram, TikTok, YouTube, Threads и Facebook и даст советы. Это одна сессия Claude, 1–3 минуты.</div></section>`
+  const report = !r ? `<section class="card raised"><div class="empty"><div class="em-icon">${icon('chart')}</div><div class="em-title">Сводки из Metricool ещё нет</div>Нажми «Обновить сводку»: сессия соберёт цифры по Instagram, TikTok, YouTube, Threads и Facebook и даст советы. Это одна сессия исполнителя, 1–3 минуты.</div></section>`
     : `<section class="card raised"><div class="sec-title">${icon('chart')}Сводка за ${esc(r.period || 'неделю')}<span class="grow"></span><span class="faint">${when(r.generated_at)}</span></div>
         ${r.summary ? `<p class="muted" style="margin:0 0 10px">${esc(r.summary)}</p>` : ''}
         <div class="nets">${(r.networks || []).map((n) => `<div class="net">
@@ -942,10 +942,10 @@ function socRivals() {
   const c = S.data.content;
   const { x, wait } = insight('rivals');
   const head = `<section class="card raised"><div class="sec-title">${icon('eye')}Похожие каналы<span class="grow"></span><button class="btn small" data-action="rivals-find">${icon('search')}Подобрать похожие</button></div>
-    <p class="muted" style="margin:0 0 8px">Лучшие посты за неделю у каналов, на которые стоит смотреть. Удачное можно взять в банк идей.</p>
+    <p class="muted" style="margin:0 0 8px">Посты за неделю у каналов, на которые стоит смотреть. Просмотры MAX отдаёт только владельцу канала, поэтому у чужих каналов их нет, и лучшие посты определяются по свежести и объёму текста. Это не то же самое, что отбор по просмотрам.</p>
     <form class="row" data-form="rival"><input class="input grow" name="username" placeholder="chat_id канала в MAX (числом)" autocomplete="off"><button class="btn small">${icon('plus')}Добавить</button></form></section>
     <section class="card raised"><div class="sec-title">${icon('spark')}Автопосты по мотивам<span class="grow"></span><label class="net-chk"><input type="checkbox" data-action="auto-toggle" ${c.auto?.enabled ? 'checked' : ''}><span>${c.auto?.enabled ? 'включены' : 'выключены'}</span></label></div>
-      <p class="muted" style="margin:0 0 8px">В 11:00 и 17:00 смотрю свежие посты этих каналов. Если пост заходит лучше их среднего, пишу на эту тему твой пост: в твоём стиле по примерам из канала, с проверкой на штампы. Черновик приходит в бот с кнопкой «Опубликовать». Сам ничего не публикую.</p>
+      <p class="muted" style="margin:0 0 8px">В 11:00 и 17:00 смотрю свежие посты этих каналов. Беру те, что свежие и объёмные, а в каналах, где бот видит просмотры, ещё и те, что набрали охват. Черновик приходит в бот с кнопкой «Опубликовать». Сам ничего не публикую.</p>
       <div class="row" style="flex-wrap:wrap;gap:6px"><span class="faint">В день до</span><div class="seg">${[1, 2, 3, 5].map((n) => `<button class="${c.auto?.perDay === n ? 'on' : ''}" data-action="auto-per" data-id="${n}">${n}</button>`).join('')}</div>
       <span class="faint">Сети:</span>${['max', 'linkedin', 'threads'].map((n) => `<label class="net-chk"><input type="checkbox" data-action="auto-net" data-id="${n}" ${c.auto?.networks?.includes(n) ? 'checked' : ''}><span>${c.networks[n]}</span></label>`).join('')}
       <span class="grow"></span><span class="faint">сегодня ${c.auto?.today || 0} из ${c.auto?.perDay}</span><button class="btn small" data-action="auto-run" ${c.auto?.busy ? 'disabled' : ''}>${icon('refresh')}${c.auto?.busy ? 'Пишу…' : 'Проверить сейчас'}</button></div></section>`;
@@ -954,6 +954,7 @@ function socRivals() {
   return head + `<div class="stack">${x.items.map((r) => `<section class="card raised">
     <div class="sec-title">${esc(r.title)} <span class="faint">канал ${esc(r.username)}</span><span class="grow"></span><button class="btn small ghost" data-action="rival-del" data-id="${esc(r.username)}" title="Убрать">${icon('trash')}</button></div>
     ${r.error ? `<div class="badge bad">${esc(r.error)}</div>` : `<div class="kpis"><div class="kpi"><span class="kpi-v">${num(r.subscribers)}</span><span class="kpi-l">подписчиков</span></div><div class="kpi"><span class="kpi-v">${r.posts7}</span><span class="kpi-l">постов за неделю</span></div><div class="kpi"><span class="kpi-v">${num(r.avgViews)}</span><span class="kpi-l">просмотров на пост</span></div></div>
+    ${r.viewsKnown ? '' : '<div class="faint">Просмотры этого канала боту не видны (право view_stats есть только у владельца канала). Посты отобраны по свежести и объёму, а не по просмотрам.</div>'}
     <div class="posts">${r.top.map((p) => `<div class="post"><div class="post-text clamp" style="--lines:3" data-key="rv${esc(r.username)}${p.id}">${esc(p.text)}</div><div class="post-meta"><span>${icon('eye')}${num(p.views)}</span><span>${icon('heart')}${p.reactions}</span><span class="grow"></span><button class="btn small ghost" data-action="rival-idea" data-id="${esc(r.username)}:${p.id}">${icon('plus')}В идеи</button>${p.link ? `<a class="faint" href="${esc(p.link)}" data-max-link="${esc(p.link)}" target="_blank" rel="noopener">открыть</a>` : ''}</div></div>`).join('') || '<div class="faint">За неделю постов нет.</div>'}</div>`}
   </section>`).join('')}</div>`;
 }
@@ -1150,7 +1151,7 @@ function viewSystem() {
   let botText = 'Не настроен. Создай бота у @BotFather и впиши BOT_TOKEN в .env.';
   if (st.bot.configured) botText = st.bot.owner ? `@${st.bot.username || '…'} привязан к тебе.` : 'Бот запущен, но ещё не привязан.';
   const checks = [
-    ['🤖', 'Claude', !st.authError],
+    ['🤖', 'MiniMax', !st.authError],
     ['💬', 'MAX', !st.max?.enabled || st.max.connected],
     ['🛎', 'Бот', !st.bot.configured || st.bot.status === 'running'],
     ['✉️', 'Почта', !st.mail?.enabled || st.mail.status !== 'error'],
@@ -1166,9 +1167,9 @@ function viewSystem() {
   });
   return `${top}<div class="page-head"><div><h1>Система</h1><p>Состояние мейнфрейма и подключения.</p></div><button class="btn" data-nav="people">${icon('people')}Люди</button></div>
   <div class="grid2">
-    <div class="card raised"><div class="stat-title"><span class="dot ${st.authError ? 'bad' : 'ok'}"></span>Claude</div>
-      <div class="muted">${st.authError ? `Нужен вход: ${esc(st.authError.message)}` : 'Работает на твоей подписке через claude login.'}</div>
-      ${st.authError ? '<div class="copy-line"><span class="kbd">claude auth login</span></div>' : ''}</div>
+    <div class="card raised"><div class="stat-title"><span class="dot ${st.authError ? 'bad' : 'ok'}"></span>MiniMax</div>
+      <div class="muted">${st.authError ? `Ошибка: ${esc(st.authError.message)}` : 'Работает на твоём ключе MiniMax.'}</div>
+      ${st.authError ? '<div class="copy-line"><span class="kbd">MINIMAX_API_KEY=...</span></div>' : ''}</div>
 
     <div class="card raised"><div class="stat-title"><span class="dot ${!st.bot.configured ? '' : st.bot.owner ? 'ok' : 'warn'}"></span>Бот управления</div>
       <div class="muted">${esc(botText)}</div>
@@ -1236,7 +1237,7 @@ function projectModal(p = null) {
     if (!p) { S.project = out.id; localStorage.setItem('mf_project', out.id); S.detail = true; await refresh(); }
   });
   $('#modal-root [data-del]')?.addEventListener('click', async () => {
-    if (!await ask(`Удалить проект «${p.name}» из мейнфрейма? Папка и сессия Claude Code останутся.`)) return;
+    if (!await ask(`Удалить проект «${p.name}» из мейнфрейма? Папка и сессия исполнителя останутся.`)) return;
     $('#modal-root').innerHTML = '';
     S.project = null;
     await act(() => api(`/api/projects/${p.id}`, { method: 'DELETE' }), 'Удалено');
@@ -1244,15 +1245,15 @@ function projectModal(p = null) {
 }
 
 async function attachModal() {
-  const root = modal(`<h2>Подключить из Claude Code</h2><div class="faint" style="margin-bottom:10px">Всё с этого Mac: терминал, приложение, SDK. Проект продолжит свою последнюю сессию, а писать ему можно отсюда и из бота.</div>
+  const root = modal(`<h2>Подключить сессию</h2><div class="faint" style="margin-bottom:10px">Проект получит свою папку и продолжит разговор в ней. Писать ему можно отсюда и из бота.</div>
     <div class="row" style="margin-bottom:8px"><div class="seg"><button type="button" class="on" data-attach-mode="projects">Проекты</button><button type="button" data-attach-mode="sessions">Сессии</button></div>
     <input class="input grow" placeholder="Поиск" data-search></div>
     <div class="list" id="sess-list"><div class="empty">Загружаю…</div></div><div class="actions"><button type="button" class="btn ghost" data-close>Закрыть</button></div>`, () => {});
   let sessions = [];
   let mode = 'projects';
-  try { sessions = await api('/api/claude-sessions?limit=600'); } catch (e) { $('#sess-list').innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  try { sessions = await api('/api/sessions?limit=600'); } catch (e) { $('#sess-list').innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
   const base = (p) => (p || '').split('/').filter(Boolean).pop() || p;
-  // Claude Code keeps sessions per folder: one project = one folder, its newest session first.
+  // A project is a folder with its own session history.
   const projects = [...sessions.reduce((m, s) => {
     const g = m.get(s.cwd) || { cwd: s.cwd, name: base(s.cwd), sessions: [], last: 0 };
     g.sessions.push(s);
@@ -1291,7 +1292,7 @@ async function attachModal() {
     if (!btn) return;
     const s = sessions.find((x) => x.sessionId === btn.dataset.attach);
     const name = btn.dataset.name || s.title.slice(0, 40);
-    const out = await act(() => api('/api/claude-sessions/attach', { method: 'POST', body: { sessionId: s.sessionId, cwd: s.cwd, name } }), 'Подключено');
+    const out = await act(() => api('/api/sessions/attach', { method: 'POST', body: { sessionId: s.sessionId, cwd: s.cwd, name } }), 'Подключено');
     if (out) { root.innerHTML = ''; S.view = 'sessions'; S.project = out.id; S.detail = true; localStorage.setItem('mf_project', out.id); await refresh(); }
   });
 }
@@ -1501,7 +1502,7 @@ document.addEventListener('click', async (e) => {
     case 'attach': attachModal(); break;
     case 'back': S.detail = false; render(); break;
     case 'new-session':
-      if (p && await ask('Следующее сообщение начнёт новую сессию Claude Code. Старая останется на диске.')) await act(() => api(`/api/projects/${p.id}/new-session`, { method: 'POST' }), 'Готово');
+      if (p && await ask('Следующее сообщение начнёт новую сессию. Старая история сохранится.')) await act(() => api(`/api/projects/${p.id}/new-session`, { method: 'POST' }), 'Готово');
       break;
     case 'stop-project': {
       const r = (S.data.timeline || []).filter((x) => ['running', 'queued'].includes(x.status));

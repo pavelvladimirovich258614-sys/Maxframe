@@ -9,7 +9,7 @@
 
 import { config } from './config.js';
 import { kvGet, kvSet, addLog } from './db.js';
-import { knownChats, getMessagesAfter, maxState } from './max-chats.js';
+import { knownChats, getMessagesAfter, listMessages, maxState } from './max-chats.js';
 
 export const DEFAULT_GROUPS = [];
 
@@ -39,17 +39,23 @@ export function watchGroups(onBatch, everyMs = 60000) {
       for (const g of watchedGroups()) {
         const key = String(g.id);
         let msgs;
+        // The cursor of the API is a timestamp: GET /messages takes `after` as
+        // "messages after timestamp". The cursor of the old platform was an id
+        // of a message, so a value that is not a plausible timestamp is dropped.
+        const cur = Number(last[key]) >= 1e9 ? Number(last[key]) : 0;
         try {
-          msgs = await getMessagesAfter(key, last[key], 50);
+          msgs = cur
+            ? await getMessagesAfter(key, cur, 50)
+            : await listMessages(key, { count: 1 });
         } catch (e) {
           addLog('error', `Группа ${g.title}: ${e.message.slice(0, 150)}`);
           continue;
         }
         if (!msgs.length) continue;
-        const maxId = msgs[msgs.length - 1].id;
+        const newest = msgs[msgs.length - 1].timestamp || 0;
         // First look at a group: start from now, not from its history.
-        if (!last[key]) { last[key] = maxId; kvSet('groups_last', last); continue; }
-        last[key] = maxId;
+        if (!cur) { last[key] = newest; kvSet('groups_last', last); continue; }
+        last[key] = newest;
         kvSet('groups_last', last);
         const keep = msgs.filter((m) => (m.text || '') && !(g.skip || []).includes(m.senderName));
         if (!keep.length) continue;

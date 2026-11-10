@@ -5,7 +5,7 @@
 // MAX chats day by day (people and the chats the bot is in, the owner's messages included)
 // and the shared memory notes.
 import { config } from './config.js';
-import { all, get, run, kvGet, kvSet, addLog } from './db.js';
+import { all, get, run, kvGet, kvSet, addLog, db, rebuildTable } from './db.js';
 import { knownChats, listMessages, getMessagesAfter } from './max-chats.js';
 import { listMemory, MEMORY_DIR } from './memory.js';
 
@@ -25,7 +25,25 @@ run(`CREATE TRIGGER IF NOT EXISTS recall_au AFTER UPDATE ON recall_docs BEGIN
 // the data accumulated there must not be lost, only its source changed (now it is MAX).
 // The same reason keeps the old ref prefix of the day documents, so the old days are updated
 // instead of being duplicated.
-run(`CREATE TABLE IF NOT EXISTS recall_tg (chat TEXT NOT NULL, msg_id INTEGER NOT NULL, at INTEGER, who TEXT, text TEXT, PRIMARY KEY (chat, msg_id))`);
+// The id of a message in MAX is a string, in Telegram it was a number. The
+// column held the id of the message, and with the id of MAX the index kept
+// only one message per chat (the id became 0 for every message). The table is
+// rebuilt with TEXT; the old rows keep their ids as text.
+run(`CREATE TABLE IF NOT EXISTS recall_tg (chat TEXT NOT NULL, msg_id TEXT NOT NULL, at INTEGER, who TEXT, text TEXT, PRIMARY KEY (chat, msg_id))`);
+const msgIdCol = db.prepare('PRAGMA table_info(recall_tg)').all().find((c) => c.name === 'msg_id');
+if (msgIdCol && String(msgIdCol.type).toUpperCase() !== 'TEXT') {
+  rebuildTable('recall_tg', `
+    CREATE TABLE recall_tg_new (
+      chat TEXT NOT NULL,
+      msg_id TEXT NOT NULL,
+      at INTEGER,
+      who TEXT,
+      text TEXT,
+      PRIMARY KEY (chat, msg_id)
+    );`, `
+    INSERT OR IGNORE INTO recall_tg_new (chat, msg_id, at, who, text)
+      SELECT chat, CAST(msg_id AS TEXT), at, who, text FROM recall_tg;`);
+}
 
 export const KINDS = { session: 'сессии мейнфрейма', max: 'MAX', mail: 'почта', group: 'рабочие группы', memory: 'память', chat: 'переписка в MAX' };
 
@@ -90,14 +108,20 @@ function maxChatList() {
   return list;
 }
 
-// The message id of MAX is a number: keep it numeric, otherwise the cursor compares strings.
-const midOf = (m) => Number(m?.id) || 0;
-const maxMid = (msgs) => Math.max(0, ...msgs.map(midOf));
+// The id of a message in MAX is a string.
+const midOf = (m) => (m?.id === undefined || m?.id === null ? '' : String(m.id));
+// The cursor of the API is a timestamp, not an id: GET /messages takes `after`
+// as "messages after timestamp". The cursor of the old platform was an id, so
+// a value that is not a plausible timestamp is dropped and the chat is read
+// from the beginning again.
+const tsOf = (m) => Number(m.timestamp) || 0;
+const maxTs = (msgs) => Math.max(0, ...msgs.map(tsOf));
+const isTimestamp = (v) => Number(v) >= 1e9;
 // Who wrote it: the owner's own messages are marked with the owner's name.
 const whoOf = (m) => (m.senderId && m.senderId === config.max.ownerId ? config.owner.name : (m.senderName || m.senderUsername || 'без имени'));
 
 let maxBusy = false;
-async function indexMax(maxChatsPerTick = 8) {
+export async function indexMax(maxChatsPerTick = 8) {
   if (maxBusy || !config.max.enabled) return 0;
   maxBusy = true;
   let added = 0;
@@ -114,13 +138,14 @@ async function indexMax(maxChatsPerTick = 8) {
       // read as MAX cursors, the message id spaces of the two are different.
       const ck = `max:${key}`;
       let msgs;
+      const cur = isTimestamp(cursor[ck]) ? Number(cursor[ck]) : 0;
       try {
-        msgs = cursor[ck]
-          ? await getMessagesAfter(key, cursor[ck], 100)
+        msgs = cur
+          ? await getMessagesAfter(key, cur, 100)
           : await listMessages(key, { count: 300 });
       } catch (e) { addLog('error', `Поиск по истории: ${c.title}: ${e.message.slice(0, 120)}`); continue; }
       const fresh = msgs.filter((m) => m.id && m.text);
-      if (!fresh.length) { if (!cursor[ck] && msgs.length) cursor[ck] = maxMid(msgs); continue; }
+      if (!fresh.length) { if (!cur && msgs.length) cursor[ck] = maxTs(msgs); continue; }
       const days = new Set();
       for (const m of fresh) {
         const at = (m.timestamp ? m.timestamp * 1000 : 0) || Date.now();
@@ -134,7 +159,7 @@ async function indexMax(maxChatsPerTick = 8) {
         upsert({ ref: `tg:${key}:${d}`, kind: 'chat', chat: c.title, who: [...new Set(rows.map((r) => r.who))].join(', '), at: rows[0]?.at || from, title: `Переписка: ${c.title}, ${d}`,
           body: rows.map((r) => `${new Date(r.at).toTimeString().slice(0, 5)} ${r.who}: ${r.text}`).join('\n') });
       }
-      cursor[ck] = Math.max(Number(cursor[ck]) || 0, maxMid(fresh));
+      cursor[ck] = Math.max(cur, maxTs(fresh));
       added += fresh.length;
     }
     kvSet('recall_tg_last', cursor);

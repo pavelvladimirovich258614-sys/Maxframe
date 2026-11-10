@@ -58,6 +58,8 @@ addLog('system', 'Мейнфрейм запущен');
 for (const { id } of all("SELECT id FROM inbox WHERE status = 'new' AND created_at > ?", Date.now() - 86400000)) {
   classify(id).catch((e) => addLog('error', `Повторный разбор ${id}: ${e.message}`));
 }
+// Messages that arrived before the crash and had not become a card yet.
+flushBursts().catch((e) => addLog('error', `Входящие: ${e.message}`));
 // A reply cut off mid-send goes back to the owner's decision.
 run("UPDATE inbox SET status = 'routed' WHERE status = 'sending'");
 

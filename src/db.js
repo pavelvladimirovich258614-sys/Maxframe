@@ -140,6 +140,26 @@ CREATE TABLE IF NOT EXISTS agent_messages (
 CREATE INDEX IF NOT EXISTS idx_agent_messages_session ON agent_messages(session_id, id);
 `);
 
+// The messages as they arrived. The queue lives in the database, so a crash
+// between the arrival of a message and the card does not lose it, and the
+// same delivery is recognised by the id of the message.
+db.exec(`
+CREATE TABLE IF NOT EXISTS inbox_raw (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id TEXT NOT NULL,
+  external_id TEXT,
+  name TEXT,
+  username TEXT,
+  text TEXT,
+  chat_type TEXT,
+  chat_title TEXT,
+  inbox_id INTEGER,
+  created_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_inbox_raw_ext ON inbox_raw(external_id) WHERE external_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_inbox_raw_chat ON inbox_raw(chat_id, inbox_id, id);
+`);
+
 // Webhook deliveries are retried by MAX, so every update id is remembered.
 db.exec(`
 CREATE TABLE IF NOT EXISTS max_updates (
@@ -160,27 +180,45 @@ db.exec('CREATE INDEX IF NOT EXISTS idx_inbox_ext ON inbox(source, external_id)'
 // string there ("datatype mismatch") - the card of the bot was sent, but the
 // link to it was lost, and the reply to the card did not find its subject.
 // The tables are rebuilt with TEXT; the old rows are copied as text.
+//
+// The rebuild runs in a transaction and drops the leftover table first: a
+// migration interrupted by a crash must not stop the service from starting on
+// the next run.
+function rebuildTable(table, ddl, copySql) {
+  db.exec('BEGIN');
+  try {
+    db.exec(`DROP TABLE IF EXISTS ${table}_new`);
+    db.exec(ddl);
+    db.exec(copySql);
+    db.exec(`DROP TABLE ${table}`);
+    db.exec(`ALTER TABLE ${table}_new RENAME TO ${table}`);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
+export { rebuildTable };
+
 function textColumn(table, column) {
   const col = db.prepare(`PRAGMA table_info(${table})`).all().find((c) => c.name === column);
   return col && String(col.type).toUpperCase() !== 'TEXT';
 }
+
 if (textColumn('bot_msgs', 'message_id')) {
-  db.exec(`
+  rebuildTable('bot_msgs', `
     CREATE TABLE bot_msgs_new (
       message_id TEXT PRIMARY KEY,
       inbox_id INTEGER,
       project_id INTEGER,
       created_at INTEGER NOT NULL
-    );
+    );`, `
     INSERT INTO bot_msgs_new (message_id, inbox_id, project_id, created_at)
-      SELECT CAST(message_id AS TEXT), inbox_id, project_id, created_at FROM bot_msgs;
-    DROP TABLE bot_msgs;
-    ALTER TABLE bot_msgs_new RENAME TO bot_msgs;
-  `);
+      SELECT CAST(message_id AS TEXT), inbox_id, project_id, created_at FROM bot_msgs;`);
 }
 if (textColumn('inbox', 'last_message_id')) {
   // The table is copied as is: only the type of the column changes.
-  db.exec(`
+  rebuildTable('inbox', `
     CREATE TABLE inbox_new (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       source TEXT NOT NULL,
@@ -198,15 +236,12 @@ if (textColumn('inbox', 'last_message_id')) {
       updated_at INTEGER NOT NULL,
       external_id TEXT,
       meta TEXT
-    );
+    );`, `
     INSERT INTO inbox_new (id, source, chat_id, name, username, text, last_message_id, status,
                            project_id, decision, draft, run_id, created_at, updated_at, external_id, meta)
       SELECT id, source, chat_id, name, username, text, CAST(last_message_id AS TEXT), status,
-             project_id, decision, draft, run_id, created_at, updated_at, external_id, meta FROM inbox;
-    DROP TABLE inbox;
-    ALTER TABLE inbox_new RENAME TO inbox;
-    CREATE INDEX IF NOT EXISTS idx_inbox_ext ON inbox(source, external_id);
-  `);
+             project_id, decision, draft, run_id, created_at, updated_at, external_id, meta FROM inbox;`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_inbox_ext ON inbox(source, external_id)');
 }
 
 export const now = () => Date.now();
@@ -246,6 +281,8 @@ export function pruneOld() {
   const cutoff = now() - 30 * 86400000;
   run('DELETE FROM log WHERE created_at < ?', cutoff);
   run('DELETE FROM run_events WHERE created_at < ?', cutoff);
+  // The collected messages that already became a card.
+  run('DELETE FROM inbox_raw WHERE inbox_id IS NOT NULL AND created_at < ?', cutoff);
 }
 pruneOld();
 setInterval(pruneOld, 86400000).unref();

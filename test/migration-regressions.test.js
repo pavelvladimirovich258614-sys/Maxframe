@@ -184,6 +184,28 @@ test('the same delivery twice does not make a second card', async () => {
   assert.equal(rows.length - before, 1);
 });
 
+test('the same message is stored once, however often it arrives', async () => {
+  await handleMaxMessage({ chatId: '890', text: 'одна и та же', name: 'Знакомый', externalId: 'e-once', chatType: 'dialog' });
+  await handleMaxMessage({ chatId: '890', text: 'одна и та же', name: 'Знакомый', externalId: 'e-once', chatType: 'dialog' });
+  await new Promise((r) => setTimeout(r, 700));
+  const raw = all('SELECT * FROM inbox_raw WHERE chat_id = ?', '890');
+  assert.equal(raw.length, 1, 'сообщение с тем же id должно лежать в очереди один раз');
+});
+
+test('a message that arrived before a crash becomes a card after the restart', async () => {
+  const { run: dbRun, now: ts } = await import('../src/db.js');
+  dbRun(
+    'INSERT INTO inbox_raw (chat_id, external_id, name, text, chat_type, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+    '891', 'e-crash', 'Знакомый', 'сообщение до падения', 'dialog', ts(),
+  );
+  const before = all("SELECT id FROM inbox WHERE source IN ('max','group')").length;
+  await flushBursts();
+  const rows = all("SELECT id FROM inbox WHERE source IN ('max','group')");
+  assert.equal(rows.length - before, 1, 'сообщение из очереди должно стать карточкой');
+  const card = get('SELECT * FROM inbox WHERE chat_id = ? ORDER BY id DESC LIMIT 1', '891');
+  assert.match(card.text, /сообщение до падения/);
+});
+
 // ---------- 6. Изоляция непрочитанных сообщений ----------
 
 test('a session without the owner may not touch the machine', () => {
@@ -192,4 +214,24 @@ test('a session without the owner may not touch the machine', () => {
   assert.equal(isUnattendedBlocked('mcp__computer__screenshot', {}), true);
   assert.equal(isUnattendedBlocked('read_file', {}), false);
   assert.equal(isUnattendedBlocked('write_file', {}), false);
+});
+
+// ---------- 7. Модели и курсоры ----------
+
+test('the studio asks a model of MiniMax, not of another provider', async () => {
+  const { contentModel } = await import('../src/content.js');
+  const { config } = await import('../src/config.js');
+  assert.equal(contentModel(), config.minimax.dispatchModel);
+  assert.match(contentModel(), /^MiniMax-/, 'модель другой провайдера API MiniMax не примет');
+});
+
+test('the cursor of the chat history is a timestamp, and the ids stay strings', async () => {
+  const { all } = await import('../src/db.js');
+  const { indexMax } = await import('../src/recall.js');
+  await indexMax();
+  const rows = all('SELECT * FROM recall_tg');
+  for (const r of rows) {
+    assert.equal(typeof r.msg_id, 'string', 'id сообщения MAX - строка');
+    assert.notEqual(r.msg_id, '', 'id не должен превращаться в 0');
+  }
 });
