@@ -10,7 +10,7 @@
 import { config } from './config.js';
 import { all, get, run, now, kvGet, kvSet, addLog } from './db.js';
 import { bus } from './bus.js';
-import { startRun, stopAll, resumeAll, stopRun, onRunFinished } from './agent.js';
+import { startRun, stopAll, resumeAll, stopRun, onRunFinished, replyInOwnerDialogue } from './agent.js';
 import { onInboxUpdate, forwardItem, replyItem, ignoreItem, getItem, handleMaxMessage } from './dispatcher.js';
 import { fireTask, updateTask } from './scheduler.js';
 import { setMainframeHandlers } from './mcp.js';
@@ -20,10 +20,11 @@ import { completeReminder } from './apple.js';
 import { refreshReport } from './social.js';
 import { contentCallback } from './content.js';
 import { listMemory, listPending, approvePending, rejectPending } from './memory.js';
+import { listResearchMaterials, saveResearchMaterial } from './research.js';
 import { MaxKeyboard } from './max-keyboard.js';
 import {
   maxApi, maxState, setMaxState, sendMessage, replyTo, editMessage, deleteMessage,
-  learnChatFromMessage, chatAllowed,
+  learnChatFromMessage, chatAllowed, typing, markSeen, refreshChatCount,
 } from './max-chats.js';
 import { messageId } from './max-api.js';
 import {
@@ -110,6 +111,8 @@ async function pushDraft(runId) {
   if (!t || t.done || !t.msgId) return;
   const r = get('SELECT * FROM runs WHERE id = ?', runId);
   if (!r || !['running', 'queued'].includes(r.status)) return;
+  // Индикатор печати не гаснет, пока идёт работа.
+  typing(t.chatId);
   const p = get('SELECT * FROM projects WHERE id = ?', r.project_id);
   const events = all("SELECT kind, content FROM run_events WHERE run_id = ? AND kind IN ('tool','text','error') ORDER BY id DESC LIMIT 5", runId).reverse();
   const steps = get("SELECT COUNT(*) c FROM run_events WHERE run_id = ? AND kind = 'tool'", runId).c;
@@ -228,12 +231,28 @@ async function handleOwnerText(chatId, text, heard = '', { files = false, replyT
     kb.row().text('🧠 Это задача мейнфрейму', `tk:${item.id}`);
     return send(chatId, `${heard}${service ? `Это сервисная рассылка (${esc(item.username || item.name)}), отвечать туда нельзя.` : `Отправить это ${esc(item.name)}${item.source === 'mail' ? ' письмом' : ''} или это задача мне?`}\n\n<blockquote>${esc(text.slice(0, 800))}</blockquote>`, { kb });
   }
+  if (!files && !heard && !replyToMid && /^(привет|здравствуй|здравствуйте|добрый день|доброе утро|добрый вечер)[!.,\s👋]*$/iu.test(text.trim())) {
+    return send(chatId, 'Привет! Чем помочь?');
+  }
+  if (!files && !heard && !replyToMid && /^(кто ты(?: и что (?:ты )?умеешь)?|что ты умеешь|что умеешь|что ты можешь)[?!.\s]*$/iu.test(text.trim())) {
+    return send(chatId, 'Я ваш помощник на MiniMax. Могу исследовать вопрос, подготовить черновик для соцсетей и помочь с учебной задачей. Команда /material открывает список ваших материалов.');
+  }
+  if (!text.trim()) return send(chatId, 'Напишите, пожалуйста, что нужно сделать.');
+  if (!files && !link?.project_id) {
+    void typing(chatId);
+    return send(chatId, body(await replyInOwnerDialogue(text)));
+  }
   const p = (link?.project_id && get('SELECT * FROM projects WHERE id = ?', link.project_id)) || currentProject();
   if (heard) await send(chatId, heard);
+  // Индикатор печати сразу: владелец сразу видит, что бот взялся за задачу.
+  await typing(chatId);
+  await markSeen(chatId);
   const runId = startRun({ projectId: p.id, prompt: text, origin: 'bot' });
   await trackRun(runId, chatId, null, p);
   return null;
 }
+
+let requestBotRestart = null;
 
 // A command from the owner.
 async function handleCommand(chatId, text) {
@@ -243,6 +262,7 @@ async function handleCommand(chatId, text) {
   const arg = rest.join(' ');
   const p = currentProject();
   switch (cmd.toLowerCase()) {
+    case '/start': return showScreen(chatId, 'home');
     case '/menu': await sendMenu(chatId); return showScreen(chatId, 'home');
     case '/app': return send(chatId, config.max.publicUrl?.startsWith('https://')
       ? '📱 Пульт:' : 'Нет https-адреса для пульта. Задай PUBLIC_URL.', {
@@ -255,8 +275,29 @@ async function handleCommand(chatId, text) {
     case '/social': return showScreen(chatId, 'soc');
     case '/tasks': return showScreen(chatId, 'tasks');
     case '/memory': { const m = memoryScreen(); return send(chatId, m.text, { kb: m.kb }); }
+    case '/material': {
+      if (!arg) {
+        const titles = listResearchMaterials().map((item) => `• ${esc(item.title)}`);
+        return send(chatId, [...titles, 'Чтобы добавить или обновить материал, напишите /material Название | текст.'].join('\n'));
+      }
+      const input = text.trim().slice(raw.length).trim();
+      const separator = input.indexOf('|');
+      if (separator === -1) return send(chatId, 'Формат: /material Название | текст');
+      try {
+        const material = saveResearchMaterial(input.slice(0, separator), input.slice(separator + 1));
+        return send(chatId, `Материал сохранён: ${esc(material.title)}. Упомяните его название в вопросе.`);
+      } catch (error) {
+        return send(chatId, esc(error.message));
+      }
+    }
     case '/stop': stopAll(); return send(chatId, '⏹ <b>Всё остановил.</b> Автоматика на паузе.', { kb: new MaxKeyboard().text('▶️ Включить', 'sys:resume') });
     case '/resume': resumeAll(); return send(chatId, '▶️ Автоматика включена.');
+    case '/restart': {
+      if (!requestBotRestart) return send(chatId, 'Перезапуск из чата недоступен.');
+      await send(chatId, 'Перезапущусь, когда закончатся текущие задачи. Личный диалог начнётся заново.');
+      requestBotRestart();
+      return;
+    }
     case '/setup': {
       const runId = startRun({ projectId: p.id, prompt: `${ONBOARDING_PROMPT}\nВ памяти уже есть заметки (mainframe memory_list): не спрашивай то, что там уже есть, уточни только пробелы.`, origin: 'bot' });
       return trackRun(runId, chatId, null, p);
@@ -280,7 +321,7 @@ async function handleCommand(chatId, text) {
       return send(chatId, lines.join('\n'));
     }
     default:
-      return send(chatId, `Не знаю команду ${esc(cmd)}. Меню: /menu, /inbox, /today, /projects, /tasks, /memory, /audience.`);
+      return send(chatId, `Не знаю команду ${esc(cmd)}. Доступные команды: ${COMMANDS.map(({ command }) => `/${command}`).join(', ')}.`);
   }
 }
 
@@ -479,10 +520,13 @@ export async function handleMaxUpdate(update) {
   if (type === 'message_created') {
     const message = update.message;
     const chat = learnChatFromMessage(message);
+    // Ignore group/channel traffic unless the owner explicitly enables it.
+    if (['chat', 'channel'].includes(message?.recipient?.chat_type) && process.env.MAX_GROUP_INBOX !== '1') return;
     const chatId = String(message?.recipient?.chat_id || '');
     const userId = message?.sender?.user_id ? String(message.sender.user_id) : '';
     const isOwner = ownerId() && userId === String(ownerId());
-    if (isOwner && chatId) kvSet('owner_max_chat_id', chatId);
+    const ownerDialog = isOwner && message?.recipient?.chat_type === 'dialog';
+    if (ownerDialog && chatId) kvSet('owner_max_chat_id', chatId);
     if (!chatAllowed(chatId)) return;
     // Our own message: an admin with read_all_messages sees them too, and a
     // card about our own reply would start a loop.
@@ -496,17 +540,20 @@ export async function handleMaxUpdate(update) {
       return tryPair(chatId, userId, text.trim().split(/\s+/).slice(1).join(' '));
     }
     // Commands live in the private chat with the owner.
-    if (isOwner && message?.recipient?.chat_type === 'dialog' && text.startsWith('/')) {
+    if (ownerDialog && text.startsWith('/')) {
       return handleCommand(chatId, text);
     }
     // A reply to one of our messages: either a reply to a person or a new task.
     const linked = linkedBotMessage(message);
-    if (isOwner && linked) {
+    if (ownerDialog && linked) {
       return handleOwnerText(chatId, text, '', { replyToMid: linked.message_id });
     }
-    if (isOwner && attachments.length) return handleFiles(chatId, message);
-    if (isOwner && attachments.some((a) => a.type === 'audio')) return handleVoice(chatId, message);
-    if (isOwner) {
+    if (isOwner && attachments.length) {
+      if (message?.recipient?.chat_type !== 'dialog') return handleFiles(chatId, message);
+      if (attachments.every((a) => a.type === 'audio')) return handleVoice(chatId, message);
+      return send(chatId, 'В личном чате я не сохраняю вложения. Напишите задачу текстом.');
+    }
+    if (ownerDialog) {
       // The menu buttons come as plain text of the menu.
       const menu = menuFor(text.trim());
       if (menu) {
@@ -577,8 +624,11 @@ async function pollLoop() {
       await pollOnce();
       setMaxState({ connected: true, error: null });
     } catch (e) {
-      setMaxState({ error: e.message });
-      addLog('error', `Опрос MAX: ${e.message.slice(0, 200)}`);
+      // The cause of a network error ("fetch failed") is in e.cause: without it
+      // the reason of the failure stays unknown.
+      const why = e?.cause?.code || e?.cause?.message || e?.message;
+      setMaxState({ connected: false, error: String(why).slice(0, 200) });
+      addLog('error', `Опрос MAX: ${why}`);
       await new Promise((r) => setTimeout(r, 5000));
     }
   }
@@ -587,21 +637,27 @@ async function pollLoop() {
 // ---------- start ----------
 
 const COMMANDS = [
+  { command: 'start', description: 'Открыть главное меню' },
   { command: 'menu', description: 'Пульт и меню' },
+  { command: 'status', description: 'Статус бота и подключений' },
   { command: 'inbox', description: 'Входящие' },
   { command: 'today', description: 'Встречи и напоминания' },
   { command: 'projects', description: 'Сессии: куда идут команды' },
   { command: 'social', description: 'Соцсети и советы' },
   { command: 'tasks', description: 'Задачи по расписанию' },
   { command: 'memory', description: 'Память: что я знаю, одобрить новое' },
+  { command: 'material', description: 'Материалы для исследования: /material Название | текст' },
   { command: 'audience', description: 'Кого я вижу: чаты и участники' },
   { command: 'setup', description: 'Знакомство: рассказать о себе' },
   { command: 'app', description: 'Открыть пульт' },
   { command: 'new', description: 'Новый проект: Название | путь' },
+  { command: 'stop', description: 'Остановить задачи и приостановить автоматику' },
   { command: 'resume', description: 'Включить автоматику' },
+  { command: 'restart', description: 'Перезапустить бота после завершения текущих задач' },
 ];
 
-export async function startBot() {
+export async function startBot({ requestRestart = null } = {}) {
+  requestBotRestart = requestRestart;
   if (!config.max.token) {
     botState.status = 'not_configured';
     setMaxState({ mode: 'off' });
@@ -614,6 +670,7 @@ export async function startBot() {
     botState.username = me?.username || null;
     // The id of the bot itself: its own messages must not become incoming cards.
     if (me?.user_id) kvSet('max_bot_id', String(me.user_id));
+    refreshChatCount();
     setMaxState({ mode: config.max.longPolling ? 'polling' : 'webhook', connected: true, account: me?.username ? `@${me.username}` : null, error: null });
     addLog('system', `Бот MAX ${me?.username ? `@${me.username}` : ''} запущен`);
   } catch (e) {
@@ -638,14 +695,13 @@ export async function startBot() {
   }
 
   onInboxUpdate(async (item, reason) => {
+    if (item.source === 'group' && process.env.MAX_GROUP_INBOX !== '1') return;
+    // No notifications for items that need no action.
+    if (reason === 'noted') return;
     if (!ownerChat()) return;
-    if (reason === 'noted') {
-      const d = item.decision ? JSON.parse(item.decision) : {};
-      if (d.finance) return;
-      const msg = await sendOwner(`<i>· ${item.source === 'mail' ? '✉️' : '💬'} ${esc(item.name)}: ${esc(cut(item.text, 140))}${d.summary ? ' — без действий' : ''}</i>`, { notify: false });
-      return remember(msg, { inboxId: item.id });
-    }
     const { text, kb } = inboxCard(item, reason);
+    // Индикатор печати: владелец видит, что бот работает.
+    await typing(ownerChat());
     const msg = await sendOwner(text, { kb });
     remember(msg, { inboxId: item.id });
   });
@@ -656,6 +712,7 @@ export async function startBot() {
     if (!ownerChat() || r.inbox_id || r.origin === 'ui') return;
     const chat = t?.chatId || ownerChat();
     const { text, kb } = resultMessage(r, project);
+    await typing(chat);
     const msg = await send(chat, text, { kb });
     remember(msg, { projectId: project.id });
   });

@@ -142,7 +142,7 @@ export async function indexMax(maxChatsPerTick = 8) {
       try {
         msgs = cur
           ? await getMessagesAfter(key, cur, 100)
-          : await listMessages(key, { count: 300 });
+          : await listMessages(key, { count: 100 });
       } catch (e) { addLog('error', `Поиск по истории: ${c.title}: ${e.message.slice(0, 120)}`); continue; }
       const fresh = msgs.filter((m) => m.id && m.text);
       if (!fresh.length) { if (!cur && msgs.length) cursor[ck] = maxTs(msgs); continue; }

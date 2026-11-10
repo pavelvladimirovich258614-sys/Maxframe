@@ -1148,7 +1148,7 @@ function viewSystem() {
   const maxText = !st.max?.enabled
     ? 'Не настроен. Нужен MAX_BOT_TOKEN в .env.'
     : `${st.max.account ? `Аккаунт ${st.max.account}. ` : ''}Режим: ${st.max.mode === 'off' ? 'выключен' : st.max.mode === 'polling' ? 'опрос' : st.max.mode === 'webhook' ? 'вебхук' : st.max.mode}. Связь: ${st.max.connected ? 'на связи' : 'нет'}. Чатов: ${st.max.chats ?? 0}.${st.max.error ? ` Ошибка: ${st.max.error}` : ''}`;
-  let botText = 'Не настроен. Создай бота у @BotFather и впиши BOT_TOKEN в .env.';
+  let botText = 'Не настроен. Создай бота в MAX и укажи MAX_BOT_TOKEN в .env.';
   if (st.bot.configured) botText = st.bot.owner ? `@${st.bot.username || '…'} привязан к тебе.` : 'Бот запущен, но ещё не привязан.';
   const checks = [
     ['🤖', 'MiniMax', !st.authError],

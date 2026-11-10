@@ -42,7 +42,7 @@ const CHAT_COLUMNS = ['type', 'title', 'username', 'status', 'participants_count
 export function rememberChat(chat) {
   if (!chat?.chat_id) return null;
   const chatId = String(chat.chat_id);
-  const existing = get('SELECT * FROM max_chats WHERE chat_id = ?', chatId);
+  const existing = knownChat(chatId);
   const patch = {};
   for (const key of CHAT_COLUMNS) {
     if (chat[key] !== undefined && chat[key] !== null) patch[key] = chat[key];
@@ -62,12 +62,18 @@ export function rememberChat(chat) {
         ...keys.map((k) => patch[k]), now(), chatId);
     }
   }
-  maxState.chats = get('SELECT COUNT(*) c FROM max_chats').c;
-  return get('SELECT * FROM max_chats WHERE chat_id = ?', chatId);
+  refreshChatCount();
+  return knownChat(chatId);
 }
 
 export const knownChats = () => all('SELECT * FROM max_chats ORDER BY type, title');
 export const knownChat = (chatId) => get('SELECT * FROM max_chats WHERE chat_id = ?', String(chatId));
+
+// The count of the known chats is shown in the dashboard, so it has to be
+// right right after the start and not only after the first event.
+export function refreshChatCount() {
+  maxState.chats = get('SELECT COUNT(*) c FROM max_chats').c;
+}
 
 // Which chats the bot answers in. An empty MAX_ALLOWED_CHATS means every chat
 // the bot is in.
@@ -191,7 +197,9 @@ const normalize = (m) => ({
 export async function listMessages(chatId, { count = 50, after, before } = {}) {
   const client = maxApi();
   if (!client) throw new Error('MAX не настроен: нужен MAX_BOT_TOKEN');
-  const data = await client.getMessages(chatId, { count, after, before });
+  // The API takes at most 100 messages per request and answers 400 on a bigger number.
+  const size = Math.max(1, Math.min(Number(count) || 50, 100));
+  const data = await client.getMessages(chatId, { count: size, after, before });
   const list = Array.isArray(data?.messages) ? data.messages : [];
   // The API answers newest first; the app reads oldest first.
   return list.map(normalize).reverse();
@@ -234,6 +242,30 @@ export const editMessage = (messageId, body) => {
   if (!client) throw new Error('MAX не настроен: нужен MAX_BOT_TOKEN');
   return client.editMessage(messageId, body);
 };
+
+// The typing indicator at the top of the chat: the owner sees that the bot is
+// working. The action is a normal request, it fails quietly.
+export async function typing(chatId) {
+  const client = maxApi();
+  if (!client || !chatId) return null;
+  try {
+    return await client.sendAction(chatId, 'typing_on');
+  } catch (e) {
+    addLog('error', `Индикатор печати: ${e.message.slice(0, 120)}`);
+    return null;
+  }
+}
+
+// The chat is marked as read by the bot.
+export async function markSeen(chatId) {
+  const client = maxApi();
+  if (!client || !chatId) return null;
+  try {
+    return await client.sendAction(chatId, 'mark_seen');
+  } catch {
+    return null;
+  }
+}
 
 export const deleteMessage = (messageId) => {
   const client = maxApi();

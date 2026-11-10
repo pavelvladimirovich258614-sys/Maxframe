@@ -8,7 +8,7 @@ import { config } from './config.js';
 import { all, get, run, now, kvGet, kvSet, addLog } from './db.js';
 import { bus } from './bus.js';
 import * as maxChats from './max-chats.js';
-import { structured, startRun } from './agent.js';
+import { structured, startRun, isPaused } from './agent.js';
 import * as linkedin from './linkedin.js';
 import { ensureSocialTask, channelStats } from './social.js';
 import { ownerContext } from './memory.js';
@@ -343,7 +343,7 @@ export async function analysis() {
 async function botMessages() {
   if (!config.owner.salesBot) return [];
   // The room of the course bot is a chat_id as well.
-  const msgs = await maxChats.listMessages(config.owner.salesBot, { count: 400 });
+  const msgs = await maxChats.listMessages(config.owner.salesBot, { count: 100 });
   return msgs
     .filter((m) => !(m.senderId && m.senderId === config.max.ownerId))
     .map((m) => ({ at: (m.timestamp ? m.timestamp * 1000 : 0) || 0, text: String(m.text || '') }))
@@ -583,6 +583,7 @@ export function startContent() {
   // There is no linked chat for the comments of a channel in MAX: the bot sees the channel
   // itself, so the comments are not a separate watched group anymore.
   const tick = async () => {
+    if (isPaused()) return;
     for (const p of all("SELECT * FROM content_posts WHERE status = 'scheduled' AND scheduled_at <= ?", Date.now())) {
       if (!DIRECT.has(netKey(p.network))) continue;
       try {
@@ -607,11 +608,11 @@ export function startContent() {
         await notifyOwner(`🗓 <b>Сегодня выйдет</b>\n\n${lines.join('\n\n')}`, { kb });
       }
     }
-    if ([11, 17].includes(d.getHours()) && kvGet('content_auto_slot', '') !== `${day()}-${d.getHours()}`) {
+    if (process.env.MAX_AUTO_PARSE === '1' && [11, 17].includes(d.getHours()) && kvGet('content_auto_slot', '') !== `${day()}-${d.getHours()}`) {
       kvSet('content_auto_slot', `${day()}-${d.getHours()}`);
       autoFromRivals(d.getHours() === 11 ? 2 : 6).catch((e) => addLog('error', `Автопосты: ${e.message}`));
     }
-    if (d.getHours() === 7 && kvGet('ideas_day', '') !== day() && !ideasBusy) refreshIdeas().catch((e) => addLog('error', `Банк идей: ${e.message}`));
+    if (process.env.MAX_AUTO_PARSE === '1' && d.getHours() === 7 && kvGet('ideas_day', '') !== day() && !ideasBusy) refreshIdeas().catch((e) => addLog('error', `Банк идей: ${e.message}`));
   };
   setTimeout(tick, 20000);
   setInterval(tick, 60000).unref();

@@ -1,0 +1,22 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { isPublicSourceAddress, readPublicSource, sourceExcerpt } from '../src/source-reader.js';
+
+test('source excerpts use publication metadata and ignore scripts', () => {
+  const article = sourceExcerpt(`<head><meta content='2026-11-10T09:00:00+08:00' property="article:published_time"></head>
+    <main><article><p>Данные &amp; детали</p><script>не выполнять</script></article></main>`);
+  assert.equal(article.publishedAt, '2026-11-10T09:00:00+08:00');
+  assert.equal(article.excerpt, 'Данные & детали');
+  assert.equal(sourceExcerpt('<script>{"datePublished":"2026-11-09"}</script><p>Статья</p>').publishedAt, '2026-11-09');
+  assert.equal(sourceExcerpt('<time datetime="2026-11-10"></time>').publishedAt, undefined);
+});
+
+test('source reader rejects local and special-use addresses', async () => {
+  for (const address of ['127.0.0.1', '169.254.169.254', '192.168.1.1', '100.64.0.1', '10.0.0.1', '::1', '::ffff:127.0.0.1']) {
+    assert.equal(isPublicSourceAddress(address), false, address);
+  }
+  assert.equal(isPublicSourceAddress('8.8.8.8'), true);
+  for (const url of ['http://example.com', 'https://127.0.0.1', 'https://[::1]', 'https://host.internal', 'https://user@example.com', 'https://example.com:8443']) {
+    await assert.rejects(readPublicSource(url), /публичные страницы HTTPS/);
+  }
+});

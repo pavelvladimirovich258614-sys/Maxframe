@@ -156,6 +156,13 @@ export const toolDefinition = ({ name, description, parameters }) => ({
   function: { name, description, parameters: parameters || { type: 'object', properties: {} } },
 });
 
+export const assistantMessage = ({ content, toolCalls, reasoning }) => ({
+  role: 'assistant',
+  content: content || '',
+  ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
+  ...(reasoning ? { reasoning_content: reasoning } : {}),
+});
+
 // Tool arguments come back as a JSON string. A model can emit a truncated or
 // wrapped fragment, so parse defensively instead of throwing the whole run away.
 export function parseToolArguments(raw) {

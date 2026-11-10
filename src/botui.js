@@ -280,6 +280,7 @@ export function systemScreen() {
     row(maxState.connected, 'MAX', maxState.account || maxState.mode),
     row(mailState.status !== 'error', 'Почта', mailState.status),
     row(Boolean(appUrl()), 'Пульт', appUrl() ? 'доступен' : 'нет адреса'),
+    'Перезапуск бота — /restart',
     '', isPaused() ? '⏸ Автоматика на паузе: ничего не отправляется само, задачи пропускаются.' : '▶️ Автоматика включена.',
   ];
   const kb = new MaxKeyboard();

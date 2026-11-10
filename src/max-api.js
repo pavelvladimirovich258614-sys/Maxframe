@@ -50,7 +50,7 @@ export class MaxApi {
     await this.throttle();
     const response = await this.fetch(url, {
       method,
-      signal,
+      signal: signal ?? AbortSignal.timeout(40000),
       headers: {
         Authorization: this.token,
         ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
@@ -82,9 +82,14 @@ export class MaxApi {
     return this.request('GET', '/me', { signal });
   }
 
-  // Commands of the bot menu. MAX takes a plain array here.
+  // Commands of the bot menu. The API takes an object with the list, and every
+  // command has the fields name and description.
   setCommands(commands, signal) {
-    return this.request('PATCH', '/me/commands', { body: commands, signal });
+    const list = (commands || [])
+      .map((c) => ({ name: String(c.name || c.command || '').trim(), description: String(c.description || '').trim() }))
+      .filter((c) => c.name && c.description)
+      .slice(0, 32);
+    return this.request('PATCH', '/me/commands', { body: { commands: list }, signal });
   }
 
   // ---- messages ----------------------------------------------------------
@@ -162,9 +167,10 @@ export class MaxApi {
   }
 
   // Typing indicator and similar chat actions.
+  // The body is {action: 'typing_on' | 'mark_seen' | ...}.
   sendAction(chatId, action, signal) {
     return this.request('POST', `/chats/${encodeURIComponent(String(chatId))}/actions`, {
-      body: { type: action },
+      body: { action },
       signal,
     });
   }
