@@ -10,7 +10,7 @@
 import { config } from './config.js';
 import { all, get, run, now, kvGet, kvSet, addLog } from './db.js';
 import { bus } from './bus.js';
-import { startRun, stopAll, resumeAll, stopRun, onRunFinished, replyInOwnerDialogue } from './agent.js';
+import { startRun, stopAll, resumeAll, stopRun, onRunFinished, onAllStopped, isPaused, replyInOwnerDialogue, replyInGroupDialogue } from './agent.js';
 import { onInboxUpdate, forwardItem, replyItem, ignoreItem, getItem, handleMaxMessage } from './dispatcher.js';
 import { fireTask, updateTask } from './scheduler.js';
 import { setMainframeHandlers } from './mcp.js';
@@ -254,6 +254,9 @@ async function handleOwnerText(chatId, text, heard = '', { files = false, replyT
 
 let requestBotRestart = null;
 
+const postPrompt = (text) => `Подготовь готовый черновик поста. По умолчанию площадка MAX. Используй правила копирайтинга и форматирования. ${/(?:найди|поиск|источник|интернет|проверь)/iu.test(text) ? '' : 'Используй предоставленные сведения без поиска.'} Запрос:\n${text}`;
+const groupUsage = 'Включение владельцем в нужном чате: /group on. После этого участники могут писать /ask вопрос или /post тема. Отключение: /group off.';
+
 // A command from the owner.
 async function handleCommand(chatId, text) {
   const [raw, ...rest] = text.trim().split(/\s+/);
@@ -263,6 +266,13 @@ async function handleCommand(chatId, text) {
   const p = currentProject();
   switch (cmd.toLowerCase()) {
     case '/start': return showScreen(chatId, 'home');
+    case '/help': return send(chatId, ['<b>Команды Мейнфрейма</b>', ...COMMANDS.map(({ command, description }) => `<code>/${command}</code> · ${esc(description)}`)].join('\n'));
+    case '/group': return send(chatId, groupUsage);
+    case '/ask': return arg ? handleOwnerText(chatId, arg) : send(chatId, 'Напишите /ask и ваш вопрос.');
+    case '/post': {
+      if (!arg) return send(chatId, 'Напишите /post и тему или вставьте исходный текст.');
+      return send(chatId, body(await replyInOwnerDialogue(postPrompt(text.trim().slice(raw.length).trim())), { fold: Infinity }));
+    }
     case '/menu': await sendMenu(chatId); return showScreen(chatId, 'home');
     case '/app': return send(chatId, config.max.publicUrl?.startsWith('https://')
       ? '📱 Пульт:' : 'Нет https-адреса для пульта. Задай PUBLIC_URL.', {
@@ -505,7 +515,60 @@ async function tryPair(chatId, userId, payload) {
 }
 
 // The entry point of every event, from webhook and from long polling.
-export async function handleMaxUpdate(update) {
+const groupWorking = new Map();
+const groupCooldown = new Map();
+let groupRestarting = false;
+export const activeGroupCount = () => groupWorking.size;
+export const beginGroupRestart = () => { groupRestarting = true; };
+function stopGroupWork() {
+  for (const controller of groupWorking.values()) controller.abort();
+}
+onAllStopped(stopGroupWork);
+
+async function handleGroupCommand(message, chatId, isOwner, background) {
+  const text = message.body?.text?.trim() || '';
+  const command = /^\/(group|ask|post|help)(?:@([\w.]+))?(?:\s+([\s\S]*))?$/i.exec(text);
+  if (!command) return false;
+  const [, raw, addressedTo, arg = ''] = command;
+  if (addressedTo && addressedTo.toLowerCase() !== botState.username?.toLowerCase()) return true;
+  const name = raw.toLowerCase();
+  const key = `max_group_assistant:${chatId}`;
+  if (name === 'group') {
+    if (!isOwner) return true;
+    const mode = arg.trim().toLowerCase();
+    if (mode === 'on' || mode === 'off') kvSet(key, mode === 'on');
+    if (mode === 'off') groupWorking.get(chatId)?.abort();
+    await send(chatId, kvGet(key, false) ? `Помощник в этой группе включён. ${groupUsage}` : `Помощник в этой группе выключен. ${groupUsage}`);
+    return true;
+  }
+  if (!kvGet(key, false)) return true;
+  if (name === 'help' || !arg.trim()) {
+    await send(chatId, 'Напишите /ask и вопрос или /post и тему для черновика. Для поиска используйте публичные сведения.');
+    return true;
+  }
+  if (isPaused() || groupRestarting || groupWorking.size >= 2 || groupWorking.has(chatId) || Date.now() < (groupCooldown.get(chatId) || 0)) return true;
+  const controller = new AbortController();
+  groupWorking.set(chatId, controller);
+  groupCooldown.set(chatId, Date.now() + 20000);
+  if (groupCooldown.size > 100) groupCooldown.delete(groupCooldown.keys().next().value);
+  const work = async () => {
+    try {
+      void typing(chatId);
+      const answer = await replyInGroupDialogue(name === 'post' ? postPrompt(arg) : arg, controller.signal);
+      if (!controller.signal.aborted && kvGet(key, false)) await send(chatId, body(answer || 'Ответ не получен. Попробуйте уточнить вопрос.', { fold: name === 'post' ? Infinity : 650 }));
+    } catch {
+      addLog('error', 'Не удалось обработать команду помощника в группе MAX');
+      if (!controller.signal.aborted && kvGet(key, false)) await send(chatId, 'Не удалось подготовить ответ. Попробуйте позже.').catch(() => {});
+    } finally {
+      groupWorking.delete(chatId);
+    }
+  };
+  if (background) void work();
+  else await work();
+  return true;
+}
+
+export async function handleMaxUpdate(update, { backgroundGroup = false } = {}) {
   if (!update || typeof update !== 'object') return;
   const type = update.update_type;
   const key = type === 'message_created'
@@ -519,9 +582,7 @@ export async function handleMaxUpdate(update) {
 
   if (type === 'message_created') {
     const message = update.message;
-    const chat = learnChatFromMessage(message);
-    // Ignore group/channel traffic unless the owner explicitly enables it.
-    if (['chat', 'channel'].includes(message?.recipient?.chat_type) && process.env.MAX_GROUP_INBOX !== '1') return;
+    learnChatFromMessage(message);
     const chatId = String(message?.recipient?.chat_id || '');
     const userId = message?.sender?.user_id ? String(message.sender.user_id) : '';
     const isOwner = ownerId() && userId === String(ownerId());
@@ -531,6 +592,10 @@ export async function handleMaxUpdate(update) {
     // Our own message: an admin with read_all_messages sees them too, and a
     // card about our own reply would start a loop.
     if (userId && botUserId() && userId === String(botUserId())) return;
+    const chatType = message?.recipient?.chat_type;
+    if (chatId && userId && chatType === 'chat' && !message.sender?.is_bot
+      && await handleGroupCommand(message, chatId, isOwner, backgroundGroup)) return;
+    if (['chat', 'channel'].includes(chatType) && process.env.MAX_GROUP_INBOX !== '1') return;
 
     const text = message?.body?.text || '';
     const attachments = message?.body?.attachments || [];
@@ -604,7 +669,7 @@ async function pollOnce() {
   const updates = Array.isArray(data?.updates) ? data.updates : [];
   for (const update of updates) {
     try {
-      await handleMaxUpdate(update);
+      await handleMaxUpdate(update, { backgroundGroup: true });
     } catch (e) {
       addLog('error', `Событие MAX: ${e.message.slice(0, 200)}`);
     }
@@ -638,6 +703,12 @@ async function pollLoop() {
 
 const COMMANDS = [
   { command: 'start', description: 'Открыть главное меню' },
+  { command: 'help', description: 'Список всех команд' },
+  { command: 'material', description: 'Материалы для исследования' },
+  { command: 'post', description: 'Подготовить черновик поста' },
+  { command: 'ask', description: 'Задать вопрос помощнику' },
+  { command: 'restart', description: 'Перезапустить бота после завершения текущих задач' },
+  { command: 'group', description: 'Включить или выключить помощника в группе' },
   { command: 'menu', description: 'Пульт и меню' },
   { command: 'status', description: 'Статус бота и подключений' },
   { command: 'inbox', description: 'Входящие' },
@@ -646,14 +717,12 @@ const COMMANDS = [
   { command: 'social', description: 'Соцсети и советы' },
   { command: 'tasks', description: 'Задачи по расписанию' },
   { command: 'memory', description: 'Память: что я знаю, одобрить новое' },
-  { command: 'material', description: 'Материалы для исследования: /material Название | текст' },
   { command: 'audience', description: 'Кого я вижу: чаты и участники' },
   { command: 'setup', description: 'Знакомство: рассказать о себе' },
   { command: 'app', description: 'Открыть пульт' },
   { command: 'new', description: 'Новый проект: Название | путь' },
   { command: 'stop', description: 'Остановить задачи и приостановить автоматику' },
   { command: 'resume', description: 'Включить автоматику' },
-  { command: 'restart', description: 'Перезапустить бота после завершения текущих задач' },
 ];
 
 export async function startBot({ requestRestart = null } = {}) {
@@ -680,7 +749,15 @@ export async function startBot({ requestRestart = null } = {}) {
     addLog('error', `Бот MAX не запустился: ${e.message}`);
     return;
   }
-  await client.setCommands(COMMANDS).catch((e) => addLog('error', `Команды MAX: ${e.message}`));
+  try {
+    await client.setCommands(COMMANDS, AbortSignal.timeout(12000));
+    const { commands = [] } = await client.getMe(AbortSignal.timeout(12000));
+    if (COMMANDS.some(({ command }, index) => commands[index]?.name !== command)) {
+      addLog('error', 'MAX вернул неполный список команд после обновления');
+    }
+  } catch {
+    addLog('error', 'Не удалось обновить или проверить список команд MAX');
+  }
 
   if (config.max.longPolling) {
     pollLoop();

@@ -13,7 +13,8 @@ function readSkillFile(relativePath) {
 }
 
 export const researchSkill = readSkillFile('research/SKILL.md');
-export const researchInstructions = [researchSkill, ...SKILLS.map((name) => readSkillFile(`${name}/SKILL.md`))].filter(Boolean).join('\n\n');
+export const marketingSkill = readSkillFile('social/marketing.md');
+export const researchInstructions = [researchSkill, ...SKILLS.map((name) => readSkillFile(`${name}/SKILL.md`)), marketingSkill].filter(Boolean).join('\n\n');
 const checkedMaterials = readSkillFile('research/references.md').split(/^##\s+/m).slice(1).map((section) => {
   const newline = section.indexOf('\n');
   return { title: section.slice(0, newline).trim(), text: section.slice(newline + 1).trim(), kind: 'сверенный справочник проекта' };

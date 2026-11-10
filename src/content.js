@@ -12,6 +12,7 @@ import { structured, startRun, isPaused } from './agent.js';
 import * as linkedin from './linkedin.js';
 import { ensureSocialTask, channelStats } from './social.js';
 import { ownerContext } from './memory.js';
+import { marketingSkill } from './research.js';
 import { MaxKeyboard } from './max-keyboard.js';
 
 run(`CREATE TABLE IF NOT EXISTS content_posts (
@@ -95,7 +96,8 @@ async function styleExamples() {
 }
 async function styleSystem() {
   const ex = await styleExamples();
-  return `${STYLE()}${ownerContext() ? `\n\nО владельце (из его памяти):\n${ownerContext()}` : ''}${ex ? `\n\nНастоящие посты владельца из его канала. Пиши так же: такая же длина фраз, такие же слова, такая же интонация, так же мало пафоса. Не копируй их содержание.\n\n${ex}` : ''}`;
+  const owner = ownerContext();
+  return `${STYLE()}\n\n${marketingSkill}${owner ? `\n\nО владельце (из его памяти):\n${owner}` : ''}${ex ? `\n\nНастоящие посты владельца из его канала. Пиши так же: такая же длина фраз, такие же слова, такая же интонация, так же мало пафоса. Не копируй их содержание.\n\n${ex}` : ''}`;
 }
 const REWRITE_SCHEMA = { type: 'object', additionalProperties: false, required: ['text'], properties: { text: { type: 'string' } } };
 export async function writeClean(prompt) {

@@ -39,7 +39,7 @@ export function mdToHtml(md = '') {
     .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
     .replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,!?]|$)/g, '$1<i>$2</i>')
     .replace(/`([^`\n]+)`/g, '<code>$1</code>')
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_, label, url) => `<a href="${url.replace(/"/g, '&quot;')}">${label}</a>`)
     .replace(/^\s*[-*]\s+/gm, '• ')
     .replace(/\n{3,}/g, '\n\n');
   return s.replace(/\u0000(\d+)\u0000/g, (_, i) => blocks[Number(i)]).trim();

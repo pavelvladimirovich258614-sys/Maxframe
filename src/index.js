@@ -1,7 +1,7 @@
 import { config } from './config.js';
 import { addLog, all, run, kvGet, kvSet } from './db.js';
 import { startWeb } from './web.js';
-import { startBot, stopBot } from './max-bot.js';
+import { startBot, stopBot, activeGroupCount, beginGroupRestart } from './max-bot.js';
 import { handleMail, handleGroupBatch, classify, flushBursts } from './dispatcher.js';
 import { watchGroups, stopGroups } from './groups.js';
 import { watchMail, stopMail } from './mail.js';
@@ -24,7 +24,7 @@ const restartIfIdle = () => {
   if (!restartRequested || restartTimer || exitCode) return;
   restartTimer = setTimeout(() => {
     restartTimer = null;
-    if (activeRuns().length) return;
+    if (activeRuns().length || activeGroupCount()) { restartIfIdle(); return; }
     exitCode = 75;
     addLog('system', 'Перезапуск по запросу');
     process.kill(process.pid, 'SIGTERM');
@@ -32,6 +32,7 @@ const restartIfIdle = () => {
 };
 function requestRestart() {
   restartRequested = true;
+  beginGroupRestart();
   restartIfIdle();
 }
 onRunFinished(() => restartIfIdle());

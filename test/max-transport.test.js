@@ -20,12 +20,19 @@ process.env.SEARXNG_URL = 'https://search.example';
 process.env.YANDEX_WEATHER_KEY = 'fake-yandex-key';
 
 const apiCalls = [];
+let blockGroupModel = false;
 const realFetch = globalThis.fetch;
 
 globalThis.fetch = async (url, options = {}) => {
   const href = String(url);
   if (href.startsWith('http://127.0.0.1')) return realFetch(url, options);
   apiCalls.push({ url: href, body: options.body ? JSON.parse(options.body) : null, headers: options.headers || {} });
+  if (blockGroupModel && href.endsWith('/chat/completions')) {
+    return new Promise((resolve, reject) => {
+      if (options.signal.aborted) return reject(new Error('aborted'));
+      options.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+    });
+  }
   if (href.startsWith('https://search.example/search?')) {
     const query = new URL(href).searchParams.get('q');
     if (query === 'проверенный выпуск') {
@@ -40,7 +47,8 @@ globalThis.fetch = async (url, options = {}) => {
   }
   // The bot info and an empty answer of the model.
   if (href.endsWith('/me')) {
-    return { ok: true, status: 200, text: async () => JSON.stringify({ user_id: 999, username: 'frame_bot', is_bot: true, first_name: 'Frame' }) };
+    const commands = apiCalls.findLast((call) => call.url.endsWith('/me/commands'))?.body.commands;
+    return { ok: true, status: 200, text: async () => JSON.stringify({ user_id: 999, username: 'frame_bot', is_bot: true, first_name: 'Frame', commands }) };
   }
   // The model answers with the tool the schema asks for.
   const body = options.body ? JSON.parse(options.body) : null;
@@ -334,11 +342,13 @@ test('every registered MAX command has a working owner handler', async () => {
   const registered = apiCalls.find((call) => call.url.endsWith('/me/commands')).body.commands;
   const expected = {
     start: /Мейнфрейм/, menu: /Мейнфрейм/, status: /MiniMax/,
+    help: /Команды Мейнфрейма/, post: /тему/, ask: /вопрос/, group: /group on/,
     inbox: /Входящие/, today: /Сегодня|Встречи/, projects: /Сессии/,
     social: /Соцсети/, tasks: /расписанию/, memory: /Память/, material: /материал/, audience: /аудитория/,
     setup: /Мейнфрейм|Работаю/, app: /Нет https-адреса/, new: /создан/,
     stop: /на паузе/, resume: /Автоматика включена/, restart: /Перезапущусь/,
   };
+  assert.deepEqual(registered.slice(0, 7).map(({ name }) => name), ['start', 'help', 'material', 'post', 'ask', 'restart', 'group']);
   assert.deepEqual(registered.map(({ name }) => name).sort(), Object.keys(expected).sort());
   const dispatch = (text, mid, chatType = 'dialog', userId = 42) => handleMaxUpdate({ update_type: 'message_created', message: {
     body: { mid, text },
@@ -358,6 +368,57 @@ test('every registered MAX command has a working owner handler', async () => {
   await dispatch('/restart', 'restart-group', 'chat');
   await dispatch('/restart', 'restart-foreign', 'dialog', 43);
   assert.equal(restarts, 1);
+});
+
+test('owner opts one group into public MiniMax commands without opening personal context', async () => {
+  apiCalls.length = 0;
+  const dispatch = (mid, text, userId = 44, chatId = '-820') => handleMaxUpdate({ update_type: 'message_created', message: {
+    body: { mid, text },
+    recipient: { chat_id: chatId, chat_type: 'chat' },
+    sender: { user_id: userId },
+  } });
+  const modelCalls = () => apiCalls.filter((call) => call.url.endsWith('/chat/completions'));
+  await dispatch('group-opt-foreign', '/group on');
+  await dispatch('group-opt-disabled', '/post Черновик до включения');
+  assert.equal(modelCalls().length, 0);
+  await dispatch('group-opt-owner', '/group@frame_bot on', 42);
+  await dispatch('group-opt-other', '/ask Вопрос из другого чата', 44, '-821');
+  await dispatch('group-opt-plain', 'Обычная реплика');
+  await dispatch('group-opt-wrong-bot', '/ask@other_bot Чужой запрос');
+  assert.equal(modelCalls().length, 0);
+  await dispatch('group-opt-post', '/post@frame_bot Анонс занятия');
+  const request = modelCalls()[0].body;
+  assert.equal(request.messages.length, 2);
+  assert.match(request.messages[0].content, /помощник в группе MAX/);
+  assert.match(request.messages[0].content, /Продуктовый маркетинг/);
+  assert.match(request.messages[1].content, /черновик поста/);
+  assert.equal(request.tools, undefined);
+  assert.ok(apiCalls.some((call) => call.url.includes('/messages?chat_id=-820') && call.body.text === 'ok'));
+  await dispatch('group-opt-off', '/group off', 42);
+  assert.equal(kvGet('max_group_assistant:-820'), false);
+  assert.equal(kvGet('owner_max_chat_id'), '42');
+});
+
+test('stopping cancels in-flight group work and suppresses its answer', async () => {
+  const dispatch = (mid, text, userId, chatId, chatType) => handleMaxUpdate({ update_type: 'message_created', message: {
+    body: { mid, text }, recipient: { chat_id: chatId, chat_type: chatType }, sender: { user_id: userId },
+  } });
+  await dispatch('cancel-enable', '/group on', 42, '-822', 'chat');
+  apiCalls.length = 0;
+  blockGroupModel = true;
+  try {
+    const pending = dispatch('cancel-ask', '/ask Помоги с задачей', 44, '-822', 'chat');
+    for (let i = 0; i < 100 && !apiCalls.some((call) => call.url.endsWith('/chat/completions')); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.ok(apiCalls.some((call) => call.url.endsWith('/chat/completions')));
+    await dispatch('cancel-stop', '/stop', 42, '42', 'dialog');
+    await pending;
+    assert.equal(apiCalls.some((call) => call.url.includes('/messages?chat_id=-822')), false);
+    await dispatch('cancel-resume', '/resume', 42, '42', 'dialog');
+  } finally {
+    blockGroupModel = false;
+  }
 });
 
 after(() => {
