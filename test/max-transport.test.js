@@ -27,7 +27,15 @@ globalThis.fetch = async (url, options = {}) => {
   if (href.startsWith('http://127.0.0.1')) return realFetch(url, options);
   apiCalls.push({ url: href, body: options.body ? JSON.parse(options.body) : null, headers: options.headers || {} });
   if (href.startsWith('https://search.example/search?')) {
-    const date = new URL(href).searchParams.get('q') === 'архивная новость' ? '2001-01-01' : '2026-11-10';
+    const query = new URL(href).searchParams.get('q');
+    if (query === 'проверенный выпуск') {
+      return { ok: true, json: async () => ({ results: [
+        { title: 'Сегодня', url: 'https://example.org/today', publishedDate: new Date().toISOString().slice(0, 10) },
+        { title: 'Вчера', url: 'https://example.net/yesterday', publishedDate: new Date(Date.now() - 86400000).toISOString().slice(0, 10) },
+        { title: 'Архив', url: 'https://example.org/archive', publishedDate: '2001-01-01' },
+      ] }) };
+    }
+    const date = query === 'архивная новость' ? '2001-01-01' : '2026-11-10';
     return { ok: true, json: async () => ({ results: [{ title: 'Местная новость', url: 'https://example.org/news', publishedDate: date }] }) };
   }
   // The bot info and an empty answer of the model.
@@ -37,10 +45,11 @@ globalThis.fetch = async (url, options = {}) => {
   // The model answers with the tool the schema asks for.
   const body = options.body ? JSON.parse(options.body) : null;
   const current = body?.messages?.findLast((m) => m.role === 'user')?.content;
-  if (current === 'Напиши последние новости по нейросетям за вчера и сегодня') {
+  if (current === 'Напиши последние новости по нейросетям за вчера и сегодня' || current === 'Новости математики за вчера и сегодня') {
+    const query = current.startsWith('Напиши') ? 'архивная новость' : 'проверенный выпуск';
     const message = body.messages.some((m) => m.role === 'tool') ? { content: 'https://example.org/news' } : {
       content: '',
-      tool_calls: [{ id: 'old-news', type: 'function', function: { name: 'web_search', arguments: '{"query":"архивная новость","category":"news","period":"day"}' } }],
+      tool_calls: [{ id: 'dated-news', type: 'function', function: { name: 'web_search', arguments: JSON.stringify({ query, category: 'news', period: 'day' }) } }],
     };
     return { ok: true, text: async () => JSON.stringify({ choices: [{ message }] }) };
   }
@@ -181,6 +190,23 @@ test('two-day news uses a wider search but refuses out-of-period publications', 
   const sent = apiCalls.findLast((call) => call.url.includes('/messages'));
   assert.match(sent.body.text, /Не удалось подтвердить публикации/);
   assert.doesNotMatch(sent.body.text, /example\.org/);
+});
+
+test('two-day synthesis receives only dated publications from the requested days', async () => {
+  apiCalls.length = 0;
+  await handleMaxUpdate({ update_type: 'message_created', message: {
+    body: { mid: 'two-day-confirmed-news', text: 'Новости математики за вчера и сегодня' },
+    recipient: { chat_id: '42', chat_type: 'dialog' },
+    sender: { user_id: 42 },
+  } });
+  const synthesis = apiCalls.findLast((call) => call.url.endsWith('/chat/completions')).body;
+  assert.equal(synthesis.tools, undefined);
+  const evidence = JSON.parse(synthesis.messages.at(-1).content.split('\n').at(-1));
+  assert.deepEqual(evidence.map((source) => source.url), ['https://example.org/today', 'https://example.net/yesterday']);
+  assert.ok(evidence.every((source) => source.dateFrom === 'выдача'));
+  const sent = apiCalls.findLast((call) => call.url.includes('/messages'));
+  assert.match(sent.body.text, /example\.org\/today/);
+  assert.doesNotMatch(sent.body.text, /archive/);
 });
 
 test('a simple greeting is answered without starting a prior task', async () => {

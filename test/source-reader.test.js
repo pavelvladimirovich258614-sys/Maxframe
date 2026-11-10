@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isPublicSourceAddress, readPublicSource, sourceExcerpt } from '../src/source-reader.js';
+import { isPublicSourceAddress, readPublicSource, sourceExcerpt, verifyNewsDates } from '../src/source-reader.js';
 
 test('source excerpts use publication metadata and ignore scripts', () => {
   const article = sourceExcerpt(`<head><meta content='2026-11-10T09:00:00+08:00' property="article:published_time"></head>
@@ -9,6 +9,21 @@ test('source excerpts use publication metadata and ignore scripts', () => {
   assert.equal(article.excerpt, 'Данные & детали');
   assert.equal(sourceExcerpt('<script>{"datePublished":"2026-11-09"}</script><p>Статья</p>').publishedAt, '2026-11-09');
   assert.equal(sourceExcerpt('<time datetime="2026-11-10"></time>').publishedAt, undefined);
+});
+
+test('news verification reads independent pages and keeps only dates inside the window', async () => {
+  const called = [];
+  const checked = await verifyNewsDates([
+    { url: 'https://first.example/lower', rank: 2 },
+    { url: 'https://second.example/old', rank: 0 },
+    { url: 'https://first.example/current', rank: 0 },
+    { url: 'https://third.example/known', rank: 0, publishedAt: '2026-11-10' },
+  ], ({ publishedAt }) => ['2026-11-09', '2026-11-10'].includes(publishedAt), { read: async (url) => {
+    called.push(url);
+    return { publishedAt: url.endsWith('/current') ? '2026-11-10' : '2026-11-08', excerpt: 'Публикация' };
+  } });
+  assert.deepEqual(called, ['https://second.example/old', 'https://first.example/current']);
+  assert.deepEqual(checked.map(({ url }) => url), ['https://first.example/current']);
 });
 
 test('source reader rejects local and special-use addresses', async () => {

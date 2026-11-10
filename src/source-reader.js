@@ -79,3 +79,19 @@ export async function readPublicSource(address, signal) {
     throw new Error('Не удалось прочитать страницу. Доступна только выдержка из поиска.');
   }
 }
+
+export async function verifyNewsDates(sources, inWindow, { signal, read = readPublicSource } = {}) {
+  const candidates = new Map();
+  for (const source of [...sources].sort((left, right) => left.rank - right.rank)) {
+    const url = URL.parse(source.url);
+    if (source.publishedAt || url?.protocol !== 'https:' || candidates.has(url.hostname)) continue;
+    candidates.set(url.hostname, source);
+    if (candidates.size === 8) break;
+  }
+  const checks = await Promise.allSettled(Array.from(candidates.values(), async (source) => ({
+    url: source.url,
+    title: source.title,
+    ...(await read(source.url, signal)),
+  })));
+  return checks.filter((check) => check.status === 'fulfilled' && inWindow(check.value)).map((check) => check.value);
+}
