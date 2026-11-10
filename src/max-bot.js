@@ -10,7 +10,7 @@
 import { config } from './config.js';
 import { all, get, run, now, kvGet, kvSet, addLog } from './db.js';
 import { bus } from './bus.js';
-import { startRun, stopAll, resumeAll, stopRun, onRunFinished, onAllStopped, isPaused, replyInOwnerDialogue, replyInGroupDialogue } from './agent.js';
+import { startRun, stopAll, resumeAll, stopRun, onRunFinished, onAllStopped, isPaused, isPostRequest, replyInOwnerDialogue, replyInGroupDialogue } from './agent.js';
 import { onInboxUpdate, forwardItem, replyItem, ignoreItem, getItem, handleMaxMessage } from './dispatcher.js';
 import { fireTask, updateTask } from './scheduler.js';
 import { setMainframeHandlers } from './mcp.js';
@@ -240,7 +240,7 @@ async function handleOwnerText(chatId, text, heard = '', { files = false, replyT
   if (!text.trim()) return send(chatId, 'Напишите, пожалуйста, что нужно сделать.');
   if (!files && !link?.project_id) {
     void typing(chatId);
-    return send(chatId, body(await replyInOwnerDialogue(text)));
+    return send(chatId, body(await replyInOwnerDialogue(text), { fold: isPostRequest(text) ? Infinity : 650 }));
   }
   const p = (link?.project_id && get('SELECT * FROM projects WHERE id = ?', link.project_id)) || currentProject();
   if (heard) await send(chatId, heard);
@@ -254,7 +254,7 @@ async function handleOwnerText(chatId, text, heard = '', { files = false, replyT
 
 let requestBotRestart = null;
 
-const postPrompt = (text) => `Подготовь готовый черновик поста. По умолчанию площадка MAX. Используй правила копирайтинга и форматирования. ${/(?:найди|поиск|источник|интернет|проверь)/iu.test(text) ? '' : 'Используй предоставленные сведения без поиска.'} Запрос:\n${text}`;
+const postPrompt = (text) => `Подготовь готовый черновик поста. По умолчанию площадка MAX. Используй правила копирайтинга и форматирования. Запрос:\n${text}`;
 const groupUsage = 'Включение владельцем в нужном чате: /group on. После этого участники могут писать /ask вопрос или /post тема. Отключение: /group off.';
 
 // A command from the owner.

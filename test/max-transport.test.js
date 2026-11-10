@@ -53,6 +53,10 @@ globalThis.fetch = async (url, options = {}) => {
   // The model answers with the tool the schema asks for.
   const body = options.body ? JSON.parse(options.body) : null;
   const current = body?.messages?.findLast((m) => m.role === 'user')?.content;
+  if (current === 'Напиши пост для Telegram о проверке длины' || current?.startsWith('Сократи готовый пост, цель около 2500–2800')) {
+    const content = current.startsWith('Сократи') ? 'б'.repeat(2900) : 'а'.repeat(3600);
+    return { ok: true, text: async () => JSON.stringify({ choices: [{ message: { content } }] }) };
+  }
   if (current === 'Напиши последние новости по нейросетям за вчера и сегодня' || current === 'Новости математики за вчера и сегодня') {
     const query = current.startsWith('Напиши') ? 'архивная новость' : 'проверенный выпуск';
     const message = body.messages.some((m) => m.role === 'tool') ? { content: 'https://example.org/news' } : {
@@ -99,7 +103,7 @@ globalThis.fetch = async (url, options = {}) => {
 };
 
 const { startWeb } = await import('../src/web.js');
-const { structured } = await import('../src/agent.js');
+const { structured, isPostRequest } = await import('../src/agent.js');
 const { handleMaxUpdate, startBot } = await import('../src/max-bot.js');
 const { get, all, kvSet, kvGet } = await import('../src/db.js');
 
@@ -228,6 +232,35 @@ test('a simple greeting is answered without starting a prior task', async () => 
   assert.equal(get('SELECT count(*) AS n FROM runs').n, before);
   const sent = apiCalls.find((c) => c.url.includes('/messages'));
   assert.ok(sent, 'бот должен ответить на приветствие');
+});
+
+test('a normal Telegram post request asks for a draft without automatic search', async () => {
+  apiCalls.length = 0;
+  await handleMaxUpdate({ update_type: 'message_created', message: {
+    body: { mid: 'telegram-post-test', text: 'Напиши пост для Телеграм про контентные воронки' },
+    recipient: { chat_id: '42', chat_type: 'dialog' },
+    sender: { user_id: 42 },
+  } });
+  const request = apiCalls.findLast((call) => call.url.endsWith('/chat/completions')).body;
+  assert.equal(request.tools, undefined);
+  assert.match(request.messages[0].content, /2500–3500/);
+  assert.ok(apiCalls.some((call) => call.url.includes('/messages') && call.body.text === 'ok'));
+  assert.equal(isPostRequest('Подготовь готовый черновик поста.'), true);
+  assert.equal(isPostRequest('Составь список поставщиков'), false);
+});
+
+test('an oversized Telegram draft is revised before sending', async () => {
+  apiCalls.length = 0;
+  await handleMaxUpdate({ update_type: 'message_created', message: {
+    body: { mid: 'telegram-length-test', text: 'Напиши пост для Telegram о проверке длины' },
+    recipient: { chat_id: '42', chat_type: 'dialog' },
+    sender: { user_id: 42 },
+  } });
+  const requests = apiCalls.filter((call) => call.url.endsWith('/chat/completions'));
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].body.tools, undefined);
+  const sent = apiCalls.findLast((call) => call.url.includes('/messages'));
+  assert.equal(sent.body.text.length, 2900);
 });
 
 test('capabilities answer does not revive old work or claim local computer access', async () => {
