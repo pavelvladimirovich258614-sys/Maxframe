@@ -1,0 +1,15 @@
+# Переводы строк: в репозитории всегда LF.
+# Без этого Windows-клон превратит .sh в CRLF, и bash на сервере их не запустит.
+* text=auto eol=lf
+
+*.js   text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.sh   text eol=lf
+*.css  text eol=lf
+*.html text eol=lf
+*.svg  text eol=lf
+
+*.png  binary
+*.jpg  binary
+*.webmanifest text eol=lf

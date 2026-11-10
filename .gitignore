@@ -1,0 +1,14 @@
+# Personal: settings, data, memory, the owner's knowledge base, local MCP config
+.env
+data/
+mcp.json
+kb/*
+!kb/README.md
+!kb/примеры/
+scripts/personal/
+# Built or downloaded
+node_modules/
+vendor/
+# System
+.DS_Store
+.impeccable/

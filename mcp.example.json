@@ -1,0 +1,31 @@
+{
+  "mcpServers": {
+    "_note": "Скопируй в mcp.json. Серверы подключаются к каждой сессии мейнфрейма. Чтобы выключить сервер, добавь \"disabled\": true. Telegram-аккаунт подключается сам из .env.",
+    "apple": {
+      "command": "/Applications/macos-apps-mcp.app/Contents/MacOS/macos-apps-mcp",
+      "args": [
+        "-E",
+        "-s",
+        "-P",
+        "-m",
+        "macos_apps_mcp",
+        "shim"
+      ]
+    },
+    "computer": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@zavora-ai/computer-use-mcp"
+      ]
+    },
+    "browser": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@latest"
+      ]
+    },
+    "_apple_note": "Apple-приложения через подписанное приложение macos-apps-mcp (github.com/elfensky/macos-apps-mcp/releases): положить в /Applications и открыть один раз. Права macOS выдаются приложению. Отправка почты: macos-apps-mcp allow-send mail."
+  }
+}
