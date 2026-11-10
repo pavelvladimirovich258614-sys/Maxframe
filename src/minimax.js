@@ -10,6 +10,29 @@
 const DEFAULT_BASE_URL = 'https://api.minimax.io/v1';
 const DEFAULT_MODEL = 'MiniMax-M3.1-Flash';
 
+// The API documents only a 200 response and carries the real status in
+// base_resp.status_code: 1004 - wrong key, 1008 - not enough money,
+// 2013 - wrong parameters. Without this check a failed call looks like an
+// empty answer and the run finishes with "nothing to say".
+const BASE_ERRORS = {
+  1000: 'неизвестная ошибка MiniMax',
+  1001: 'MiniMax не ответил вовремя',
+  1002: 'сработал лимит запросов MiniMax',
+  1004: 'ключ MiniMax отвергнут: проверь MINIMAX_API_KEY',
+  1008: 'на балансе MiniMax не хватает средств',
+  1013: 'внутренняя ошибка MiniMax',
+  1027: 'ответ MiniMax отклонён фильтром содержимого',
+  1039: 'превышен лимит токенов MiniMax',
+  2013: 'MiniMax отверг параметры запроса',
+};
+
+// The API accepts these values only; "none" and any typo give HTTP 400.
+const REASONING_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+
+// Thinking may come inline in the content, wrapped in <think> tags. It must
+// not reach the user or the history.
+const THINK_RE = /<think>[\s\S]*?<\/think>/g;
+
 export class MiniMaxError extends Error {
   constructor(message, { status = 0, code = null, body = null } = {}) {
     super(message);
@@ -49,9 +72,19 @@ export class MiniMaxClient {
     if (!response.ok) {
       // Never echo the key: only the server's own message reaches the log.
       const message = parsed?.error?.message || parsed?.message || `HTTP ${response.status}`;
-      throw new MiniMaxError(`MiniMax ${method} ${path}: ${message}`, {
+      throw new MiniMaxError(`MiniMax ${method} ${path}: HTTP ${response.status} · ${message}`, {
         status: response.status,
         code: parsed?.error?.code || parsed?.code || null,
+        body: parsed,
+      });
+    }
+    // A failed call can come with HTTP 200: the reason is in base_resp.
+    const base = parsed?.base_resp?.status_code;
+    if (base) {
+      const why = BASE_ERRORS[base] || parsed?.base_resp?.status_msg || `код ${base}`;
+      throw new MiniMaxError(`MiniMax ${method} ${path}: ${why}`, {
+        status: response.status,
+        code: base,
         body: parsed,
       });
     }
@@ -85,7 +118,14 @@ export class MiniMaxClient {
     }
     if (typeof temperature === 'number') body.temperature = temperature;
     if (maxTokens) body.max_completion_tokens = maxTokens;
-    if (reasoningEffort) body.reasoning_effort = reasoningEffort;
+    if (reasoningEffort) {
+      // The API accepts only these values and answers 400 to anything else.
+      if (REASONING_EFFORTS.has(reasoningEffort)) body.reasoning_effort = reasoningEffort;
+      else this.onInvalidEffort?.(reasoningEffort);
+    }
+    // The thinking goes into reasoning_content. With the default (false) it would
+    // be folded into the content inside <think> tags and reach the user.
+    body.reasoning_split = true;
     if (responseFormat) body.response_format = responseFormat;
 
     const data = await this.request('/chat/completions', body, { signal });
@@ -96,9 +136,11 @@ export class MiniMaxClient {
       type: 'function',
       function: { name: tc.function?.name || '', arguments: tc.function?.arguments || '{}' },
     }));
+    const raw = typeof message.content === 'string' ? message.content : '';
     return {
-      content: typeof message.content === 'string' ? message.content : '',
-      reasoning: message.reasoning_content || '',
+      // Thinking must not leak into the answer even if the model ignored the flag.
+      content: raw.replace(THINK_RE, '').trim(),
+      reasoning: message.reasoning_content || raw.match(THINK_RE)?.join('\n') || '',
       toolCalls,
       finishReason: choice?.finish_reason || 'stop',
       usage: data?.usage || null,

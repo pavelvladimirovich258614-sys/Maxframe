@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS inbox (
   name TEXT,
   username TEXT,
   text TEXT,
-  last_message_id INTEGER,
+  last_message_id TEXT,
   status TEXT DEFAULT 'new',
   project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
   decision TEXT,
@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS log (
 );
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS bot_msgs (
-  message_id INTEGER PRIMARY KEY,
+  message_id TEXT PRIMARY KEY,
   inbox_id INTEGER,
   project_id INTEGER,
   created_at INTEGER NOT NULL
@@ -154,6 +154,60 @@ const inboxCols = db.prepare('PRAGMA table_info(inbox)').all().map((c) => c.name
 if (!inboxCols.includes('external_id')) db.exec('ALTER TABLE inbox ADD COLUMN external_id TEXT');
 if (!inboxCols.includes('meta')) db.exec('ALTER TABLE inbox ADD COLUMN meta TEXT');
 db.exec('CREATE INDEX IF NOT EXISTS idx_inbox_ext ON inbox(source, external_id)');
+
+// The id of a message in MAX is a string, in Telegram it was a number. The
+// columns that hold it were declared INTEGER, and SQLite refuses to put a
+// string there ("datatype mismatch") - the card of the bot was sent, but the
+// link to it was lost, and the reply to the card did not find its subject.
+// The tables are rebuilt with TEXT; the old rows are copied as text.
+function textColumn(table, column) {
+  const col = db.prepare(`PRAGMA table_info(${table})`).all().find((c) => c.name === column);
+  return col && String(col.type).toUpperCase() !== 'TEXT';
+}
+if (textColumn('bot_msgs', 'message_id')) {
+  db.exec(`
+    CREATE TABLE bot_msgs_new (
+      message_id TEXT PRIMARY KEY,
+      inbox_id INTEGER,
+      project_id INTEGER,
+      created_at INTEGER NOT NULL
+    );
+    INSERT INTO bot_msgs_new (message_id, inbox_id, project_id, created_at)
+      SELECT CAST(message_id AS TEXT), inbox_id, project_id, created_at FROM bot_msgs;
+    DROP TABLE bot_msgs;
+    ALTER TABLE bot_msgs_new RENAME TO bot_msgs;
+  `);
+}
+if (textColumn('inbox', 'last_message_id')) {
+  // The table is copied as is: only the type of the column changes.
+  db.exec(`
+    CREATE TABLE inbox_new (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source TEXT NOT NULL,
+      chat_id TEXT,
+      name TEXT,
+      username TEXT,
+      text TEXT,
+      last_message_id TEXT,
+      status TEXT DEFAULT 'new',
+      project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+      decision TEXT,
+      draft TEXT,
+      run_id INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      external_id TEXT,
+      meta TEXT
+    );
+    INSERT INTO inbox_new (id, source, chat_id, name, username, text, last_message_id, status,
+                           project_id, decision, draft, run_id, created_at, updated_at, external_id, meta)
+      SELECT id, source, chat_id, name, username, text, CAST(last_message_id AS TEXT), status,
+             project_id, decision, draft, run_id, created_at, updated_at, external_id, meta FROM inbox;
+    DROP TABLE inbox;
+    ALTER TABLE inbox_new RENAME TO inbox;
+    CREATE INDEX IF NOT EXISTS idx_inbox_ext ON inbox(source, external_id);
+  `);
+}
 
 export const now = () => Date.now();
 

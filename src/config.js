@@ -81,6 +81,8 @@ export const config = {
 // everything is local.
 config.macRunner = env('MAC_RUNNER');
 config.serverDirs = list('SERVER_DIRS');
+// How long to wait for the rest of a message before making a card of it.
+config.inbox = { burstMs: Math.max(200, Number(env('INBOX_BURST_MS', '2500')) || 2500) };
 // The Mac is reached over the same tunnel: ssh -p 2222 through the local port
 // forward. Commands of a Mac project run there, not on the server.
 config.mac = {

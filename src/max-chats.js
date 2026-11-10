@@ -180,6 +180,12 @@ const normalize = (m) => ({
   senderUsername: m?.sender?.username || null,
   // MAX counts the time in seconds. Milliseconds are made where they are needed.
   timestamp: m?.timestamp || null,
+  // Views are given only for channels, and only to a bot with the view_stats
+  // permission (MAX grants it to the owner of the channel). For other chats the
+  // field is null - that is the answer, not a missing number.
+  views: m?.stat?.views ?? null,
+  // The public link of the message. It is null for dialogs and non-public chats.
+  url: m?.url || null,
 });
 
 export async function listMessages(chatId, { count = 50, after, before } = {}) {

@@ -2,7 +2,7 @@ import { config } from './config.js';
 import { addLog, all, run } from './db.js';
 import { startWeb } from './web.js';
 import { startBot, stopBot } from './max-bot.js';
-import { handleMail, handleGroupBatch, classify } from './dispatcher.js';
+import { handleMail, handleGroupBatch, classify, flushBursts } from './dispatcher.js';
 import { watchGroups, stopGroups } from './groups.js';
 import { watchMail, stopMail } from './mail.js';
 import { saveReport, ensureSocialTask } from './social.js';
@@ -66,6 +66,9 @@ const shutdown = async (signal) => {
   stopTunnel();
   stopMail();
   stopGroups();
+  // The messages collected but not yet turned into a card are flushed first:
+  // otherwise the last burst is lost.
+  await flushBursts().catch((e) => addLog('error', `Входящие: ${e.message}`));
   await stopBot();
   process.exit(0);
 };

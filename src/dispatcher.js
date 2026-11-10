@@ -33,10 +33,10 @@ const DECISION_SCHEMA = {
   type: 'object',
   properties: {
     action: { type: 'string', enum: ['forward', 'reply', 'note', 'ask'], description: 'forward: передать в сессию проекта; reply: ответить по базе знаний; note: просто учесть; ask: спросить владельца' },
-    project_id: { type: ['integer', 'null'], description: 'ID проекта для forward' },
+    project_id: { type: 'integer', description: 'ID проекта для forward. Не указывай, если проект не выбран.' },
     summary: { type: 'string', description: 'О чём сообщение, одной фразой' },
     task: { type: 'string', description: 'Для forward: понятная инструкция для сессии с цитатой правок' },
-    reply_draft: { type: ['string', 'null'], description: 'Для reply: готовый ответ от имени владельца' },
+    reply_draft: { type: 'string', description: 'Для reply: готовый ответ от имени владельца' },
     confidence: { type: 'number', minimum: 0, maximum: 1 },
   },
   required: ['action', 'summary', 'confidence'],
@@ -53,6 +53,46 @@ confidence: насколько ты уверен в действии.
 В task никогда не проси сессию отвечать или писать отправителю: ответ человеку мейнфрейм подготовит сам и отправит только после одобрения владельца.
 `.trim();
 
+// A burst of messages is collected before it becomes a card: a person who
+// writes three lines in a row should cost one model call and one card, not
+// three of each. The window is short, so the answer still feels immediate.
+const BURST_MS = config.inbox?.burstMs || 2500;
+const bursts = new Map(); // chat_id -> { items: [], timer }
+
+async function flushBurst(chat, burst) {
+  const items = burst.items;
+  if (!items.length) return;
+  const last = items[items.length - 1];
+  const isGroup = items[0].chatType === 'chat' || items[0].chatType === 'channel';
+  const source = isGroup ? 'group' : 'max';
+  const text = items
+    .map((m) => (isGroup && m.name ? `${m.name}: ${m.text}` : m.text))
+    .join('\n')
+    .slice(0, 4000);
+  const meta = JSON.stringify({ chatType: items[0].chatType, title: items[0].chatTitle, lastSender: last.name });
+  const contact = get('SELECT * FROM contacts WHERE chat_id = ?', chat);
+  const res = run(
+    'INSERT INTO inbox (source, chat_id, name, username, text, last_message_id, external_id, meta, status, project_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    source, chat, last.name || items[0].chatTitle || '', last.username || null, text, last.externalId || null, last.externalId || null, meta,
+    'new', contact?.project_id ?? null, now(), now(),
+  );
+  const id = Number(res.lastInsertRowid);
+  bus.change('inbox', id);
+  addLog('inbox', `${last.name || chat}: ${text.slice(0, 150)}`);
+  await classify(id);
+}
+
+// Everything that was collected but not yet turned into a card: it is flushed
+// before the service stops, so a restart does not swallow the last messages.
+export async function flushBursts() {
+  const pending = [...bursts.values()];
+  bursts.clear();
+  for (const [chat, burst] of pending) {
+    clearTimeout(burst.timer);
+    await flushBurst(chat, burst).catch((e) => addLog('error', `Входящие: ${e.message}`));
+  }
+}
+
 export async function handleMaxMessage({ chatId, text, name, username, externalId, chatType = 'dialog', chatTitle = null }) {
   const chat = String(chatId || '');
   if (!chat) return;
@@ -65,19 +105,19 @@ export async function handleMaxMessage({ chatId, text, name, username, externalI
   if (!contact) {
     run('INSERT INTO contacts (chat_id, name, username, updated_at) VALUES (?, ?, ?, ?)', chat, name || chatTitle || '', username || null, now());
   }
-  const isGroup = chatType === 'chat' || chatType === 'channel';
-  const source = isGroup ? 'group' : 'max';
-  const meta = JSON.stringify({ chatType, title: chatTitle, lastSender: name });
 
-  const res = run(
-    'INSERT INTO inbox (source, chat_id, name, username, text, last_message_id, external_id, meta, status, project_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    source, chat, name || chatTitle || '', username || null, String(text), externalId || null, meta,
-    'new', contact?.project_id ?? null, now(), now(),
-  );
-  const id = Number(res.lastInsertRowid);
-  bus.change('inbox', id);
-  addLog('inbox', `${name || chat}: ${String(text).slice(0, 150)}`);
-  await classify(id);
+  const burst = bursts.get(chat) || { items: [], timer: null };
+  // The same delivery may arrive twice before the burst is turned into a card.
+  if (externalId && burst.items.some((m) => m.externalId === externalId)) return;
+  burst.items.push({ text: String(text), name, username, externalId, chatType, chatTitle });
+  if (!burst.timer) {
+    burst.timer = setTimeout(() => {
+      bursts.delete(chat);
+      flushBurst(chat, burst).catch((e) => addLog('error', `Входящие: ${e.message}`));
+    }, BURST_MS);
+    burst.timer.unref?.();
+  }
+  bursts.set(chat, burst);
 }
 
 export async function classify(id) {
@@ -137,7 +177,7 @@ export async function classify(id) {
   return notify(item2, 'routed');
 }
 
-export async function forwardItem(id, { projectId, text, task } = {}) {
+export async function forwardItem(id, { projectId, text, task, approved = false } = {}) {
   const item = getItem(id);
   if (!item) throw new Error('Нет такого сообщения');
   if (item.status === 'forwarded') throw new Error('Уже отправлено в сессию, она работает');
@@ -151,7 +191,10 @@ export async function forwardItem(id, { projectId, text, task } = {}) {
     '',
     'Не пиши этому человеку и никому в MAX сам. Закончи работу и дай итог: мейнфрейм подготовит ответ и отправит его после одобрения владельца.',
   ].join('\n');
-  const runId = startRun({ projectId: pid, prompt, origin: 'inbox', inboxId: id });
+  // approved = the owner pressed the button and saw the message. Without it
+  // the message went into the session on its own, and the session may not
+  // touch the machine of the owner.
+  const runId = startRun({ projectId: pid, prompt, origin: approved ? 'inbox' : 'inbox-auto', inboxId: id });
   update(id, { status: 'forwarded', project_id: pid, run_id: runId });
   run('UPDATE contacts SET project_id = COALESCE(project_id, ?), updated_at = ? WHERE chat_id = ?', pid, now(), item.chat_id);
   return runId;
@@ -254,7 +297,7 @@ export async function suggestReply(id, hint = '') {
       type: 'object',
       properties: {
         reply: { type: 'string', description: 'Только сам текст сообщения человеку, как он уйдёт: без заголовков, кавычек, пояснений и вариантов' },
-        warning: { type: ['string', 'null'], description: 'Что владельцу стоит проверить перед отправкой (противоречия в базе, неуверенность). Пусто, если всё ясно' },
+        warning: { type: 'string', description: 'Что владельцу стоит проверить перед отправкой (противоречия в базе, неуверенность). Пусто, если всё ясно' },
       },
       required: ['reply'],
     },

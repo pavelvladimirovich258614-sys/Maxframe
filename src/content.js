@@ -304,21 +304,33 @@ export async function analysis() {
   const msgs = await maxChats.listMessages(chatId, { count: 50 });
   const posts = msgs.map((m) => ({
     id: m.id, at: (m.timestamp ? m.timestamp * 1000 : 0) || null, text: String(m.text || '').slice(0, 300), len: String(m.text || '').length,
-    media: hasMedia(m.text), views: null, reactions: null, forwards: null, comments: null, link: null,
+    // Views come with the message of a channel (they need the view_stats
+    // permission, that is, the bot owns the channel). Reactions, reposts and
+    // comments the Bot API does not give.
+    media: hasMedia(m.text), views: m.views ?? null, reactions: null, forwards: null, comments: null, link: m.url || null,
   })).filter((p) => typeof p.at === 'number' && Date.now() - p.at > 86400000);
   if (!posts.length) return (analysisCache = { at: Date.now(), data: { count: 0 } }).data;
   const group = (fn, labels) => labels.map(([key, label]) => { const xs = posts.filter((p) => fn(p) === key); return { label, n: xs.length, avg: null }; }).filter((g) => g.n);
   const hour = (p) => new Date(p.at).getHours();
+  // The reach of the posts, when the bot may see the views.
+  const seen = posts.filter((p) => typeof p.views === 'number');
+  const avgViews = seen.length ? Math.round(seen.reduce((s, p) => s + p.views, 0) / seen.length) : null;
+  const byReach = seen.length ? [...posts].sort((a, b) => (b.views ?? -1) - (a.views ?? -1)) : [];
   const data = {
-    count: posts.length, avgViews: null, best: [], worst: [],
-    // MAX does not give the views and the reactions: the posts cannot be ranked by reach.
-    note: 'MAX не отдаёт просмотры и реакции: ранжировать посты по охвату нельзя, показаны формат, длина и время выхода.',
+    count: posts.length, avgViews, best: [], worst: [],
+    note: seen.length
+      ? 'Просмотры постов видны: бот владеет каналом. Реакций и репостов Bot API не отдаёт.'
+      : 'Просмотры в MAX бот видит только в своём канале (нужно право view_stats). Ранжировать посты по охвату нельзя, показаны формат, длина и время выхода.',
     factors: [
       { title: 'Формат', rows: group((p) => (p.media ? 'm' : 't'), [['m', 'с фото или видео'], ['t', 'только текст']]) },
       { title: 'Длина', rows: group((p) => (p.len < 500 ? 's' : p.len < 1500 ? 'm' : 'l'), [['s', 'до 500 знаков'], ['m', '500–1500'], ['l', 'больше 1500']]) },
       { title: 'Время выхода', rows: group((p) => { const h = hour(p); return h < 6 ? 'n' : h < 12 ? 'm' : h < 18 ? 'd' : 'e'; }, [['m', 'утро 6–12'], ['d', 'день 12–18'], ['e', 'вечер 18–24'], ['n', 'ночь 0–6']]) },
     ],
   };
+  if (seen.length) {
+    data.best = byReach.slice(0, 3).map((p) => ({ id: p.id, text: p.text, views: p.views }));
+    data.worst = byReach.slice(-3).reverse().map((p) => ({ id: p.id, text: p.text, views: p.views }));
+  }
   analysisCache = { at: Date.now(), data };
   return data;
 }
@@ -403,11 +415,21 @@ export async function competitorStats() {
     try {
       const chat = await maxChats.getChat(id);
       const msgs = await maxChats.listMessages(id, { count: 50 });
-      // No views in MAX: the week is given by the posts themselves, the newest first.
+      // The week is given by the posts themselves, the newest first. The views
+      // of a channel come with the message, but only to a bot with the
+      // view_stats permission - that is, to the owner of the channel. For the
+      // channels of other people they stay empty.
       const posts = msgs.filter((m) => ((m.timestamp ? m.timestamp * 1000 : 0) || 0) > since).map((m) => ({
-        id: m.id, at: (m.timestamp ? m.timestamp * 1000 : 0) || null, text: String(m.text || '').slice(0, 220), views: null, reactions: null, link: null,
+        id: m.id, at: (m.timestamp ? m.timestamp * 1000 : 0) || null, text: String(m.text || '').slice(0, 220), views: m.views ?? null, reactions: null, link: m.url || null,
       })).sort((a, b) => (b.at || 0) - (a.at || 0));
-      items.push({ ...c, username: id, chat_id: id, url: null, subscribers: chat?.participants_count ?? null, posts7: posts.length, avgViews: null, top: posts.slice(0, 3) });
+      const seen = posts.filter((p) => typeof p.views === 'number');
+      const avgViews = seen.length ? Math.round(seen.reduce((s, p) => s + p.views, 0) / seen.length) : null;
+      items.push({
+        ...c, username: id, chat_id: id, url: chat?.link || null,
+        subscribers: chat?.participants_count ?? null,
+        posts7: posts.length, avgViews,
+        top: [...posts].sort((a, b) => (b.views ?? -1) - (a.views ?? -1)).slice(0, 3),
+      });
     } catch (e) { items.push({ ...c, username: id, chat_id: id, url: null, error: e.message.slice(0, 120), top: [] }); }
   }
   compCache = { at: Date.now(), key, data: { items } };
@@ -454,12 +476,15 @@ export async function autoFromRivals(max = 2) {
       try {
         const id = competitorId(c);
         const msgs = await maxChats.listMessages(id, { count: 50 });
-        const posts = msgs.map((m) => ({ id: m.id, at: (m.timestamp ? m.timestamp * 1000 : 0) || 0, text: String(m.text || '') }))
+        const posts = msgs.map((m) => ({ id: m.id, at: (m.timestamp ? m.timestamp * 1000 : 0) || 0, text: String(m.text || ''), views: m.views ?? null }))
           .filter((p) => p.at > Date.now() - 7 * 86400000);
         for (const p of posts) {
           const age = Date.now() - p.at;
-          // MAX does not give the views: a fresh and substantial post is the signal here.
+          // A fresh and substantial post is the signal here. When the views of
+          // the channel are visible, the reach of the post is the better
+          // signal, and a post nobody saw is skipped.
           if (age < 4 * 3600000 || age > 48 * 3600000 || p.text.length < 250 || AD_RE.test(p.text)) continue;
+          if (typeof p.views === 'number' && p.views <= 0) continue;
           const key = `${id}:${p.id}`;
           if (used.some((u) => u.key === key)) continue;
           cands.push({ key, channel: c.title, at: p.at, text: p.text });

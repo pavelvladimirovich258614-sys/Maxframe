@@ -27,15 +27,22 @@ export async function channelStats(force = false) {
     date: m.timestamp ? m.timestamp * 1000 : null,
     text: String(m.text || '').slice(0, 280),
     media: null,
-    // The Bot API of MAX does not give the views, the reactions and the comments of a
-    // message: the numbers stay empty instead of being made up.
-    views: null,
+    // Views come with the message of a channel. They are null when the bot has
+    // no view_stats permission (MAX grants it to the owner of the channel) or
+    // when the chat is not a channel. Reactions and reposts the Bot API does
+    // not give - those stay empty.
+    views: m.views ?? null,
     reactions: null,
     forwards: null,
     comments: null,
-    link: null,
+    // The public link of the post. It exists for public channels.
+    link: m.url || null,
   }));
   const subs = full?.participants_count ?? null;
+  const withViews = posts.filter((p) => typeof p.views === 'number');
+  const avgViews = withViews.length
+    ? Math.round(withViews.reduce((s, p) => s + p.views, 0) / withViews.length)
+    : null;
   // Subscriber history: one point per day, so the tab can show the trend.
   const hist = kvGet('channel_history', []);
   const day = new Date().toISOString().slice(0, 10);
@@ -46,12 +53,14 @@ export async function channelStats(force = false) {
     data: {
       title: full?.title || null,
       username: full?.username || null,
-      // The chat id is the address of the channel in MAX: there is no public link.
+      // The chat id is the address of the channel in MAX. The public link of
+      // the channel, when it is public, is in Chat.link.
       chat_id: ch,
+      link: full?.link || null,
       about: full?.description ?? full?.about ?? null,
       subscribers: subs,
       subs_change_7d: weekAgo && subs !== null && weekAgo.day !== day ? subs - weekAgo.subs : null,
-      avg_views: null,
+      avg_views: avgViews,
       reach_pct: null,
       er_pct: null,
       posts,
@@ -65,7 +74,7 @@ const REPORT_PROMPT = () => `Собери сводку по соцсетям в�
 1. Metricool: getBrandSettings даст brandId и timezone. Для каждой подключённой сети (instagram, tiktok, youtube, threads, facebook) возьми последние 7 дней и предыдущие 7 дней: подписчиков (последнее значение), прирост за неделю, просмотры или охват, число публикаций, вовлечённость. Метрики ищи через getAnalyticsAvailableMetrics (connector evolution), данные через getAnalyticsDataByMetrics. Сеть без данных оставь с note.
 2. Лучшее время публикаций на ближайные 7 дней: getBestTimeToPostByNetwork для instagram и tiktok, по 3 лучших слота.
 3. Запланированные посты на 7 дней вперёд: getScheduledPosts.
-4. Канал владельца в MAX (chat_id ${channelName() || 'не задан'}). Публичного поиска каналов и ссылок на посты в MAX нет, а просмотры и реакции бот не получает: свежие посты посмотри через mainframe recall (вид «chat») и опиши их без цифр. Подписчиков канала бери из Metricool, если сеть там подключена.
+4. Канал владельца в MAX (chat_id ${channelName() || 'не задан'}). Свежие посты посмотри через mainframe recall (вид «chat»). Просмотры постов канала бот получает вместе с сообщением (если у бота есть право view_stats, то есть он владелец канала) - бери их из поля views. Реакций и репостов Bot API не отдаёт, их не выдумывай. Подписчиков канала бери из Metricool, если сеть там подключена.
 5. 3-5 советов: конкретно, из цифр (что публиковать, где и когда, что повторить, от чего отказаться). Без общих слов и без длинных тире.
 
 Числа передавай числами. В конце коротко напиши итог.`;

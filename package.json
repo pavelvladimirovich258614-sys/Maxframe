@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning src/index.js",
     "dev": "node --disable-warning=ExperimentalWarning --watch src/index.js",
-    "test": "node --test \"test/*.test.js\""
+    "test": "node --test --test-force-exit \"test/*.test.js\""
   },
   "engines": {
     "node": ">=22.13"

@@ -37,25 +37,21 @@ export function readMcpConfig() {
 }
 
 // JSON Schema for the model, derived from the same zod shapes the old server used.
+//
+// Zod 4 keeps the type in `_def.type` (in Zod 3 it was `_def.typeName`), so the
+// conversion is done by zod itself: `z.toJSONSchema` knows the types, the
+// descriptions, the enums and the nested objects. Hand-written conversion broke
+// silently on Zod 4: every parameter looked like a string, and the model passed
+// arrays and numbers as strings.
 const schemaOf = (shape) => {
-  const properties = {};
-  const required = [];
-  for (const [key, def] of Object.entries(shape)) {
-    const optional = def.isOptional();
-    const inner = def.isOptional() ? def.unwrap() : def;
-    const type = inner._def?.typeName;
-    if (type === 'ZodNumber') properties[key] = { type: 'number' };
-    else if (type === 'ZodBoolean') properties[key] = { type: 'boolean' };
-    else if (type === 'ZodArray') {
-      const item = inner._def?.type;
-      const itemType = item?._def?.typeName === 'ZodNumber' ? 'number' : 'string';
-      properties[key] = { type: 'array', items: { type: itemType } };
-    } else if (type === 'ZodEnum') {
-      properties[key] = { type: 'string', enum: inner._def?.values || [] };
-    } else properties[key] = { type: 'string' };
-    if (!optional) required.push(key);
+  try {
+    const schema = z.toJSONSchema(z.object(shape), { io: 'input' });
+    delete schema.$schema;
+    return schema;
+  } catch (e) {
+    addLog('error', `Схема инструмента не построена: ${e.message}`);
+    return { type: 'object', properties: {} };
   }
-  return { type: 'object', properties, ...(required.length ? { required } : {}) };
 };
 
 const tool = (name, description, shape, handler) => ({
@@ -186,6 +182,8 @@ async function connectServer(name, spec) {
       command: spec.command,
       args: spec.args || [],
       env: { ...process.env, ...(spec.env || {}) },
+      // Some servers need their own working directory (the project folder).
+      ...(spec.cwd ? { cwd: spec.cwd } : {}),
     });
   } else {
     throw new Error('В mcp.json сервер должен иметь url или command');

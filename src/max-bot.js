@@ -203,9 +203,15 @@ function seenUpdate(key) {
 }
 
 // The owner writes a command: the message is a reply to one of our messages.
-function linkedBotMessage(message) {
+// The bot's own id, learned from GET /me. An admin with read_all_messages sees
+// the bot's own messages too, and a card about our own reply is a loop.
+const botUserId = () => kvGet('max_bot_id', null);
+
+// The message a reply points to. MAX keeps it in link.message (the body of the
+// replied message), and the id of that body is its mid.
+export function linkedBotMessage(message) {
   const link = message?.link || message?.body?.link;
-  const mid = link?.mid || link?.message_id;
+  const mid = link?.message?.mid || link?.mid || link?.message_id;
   if (!mid) return null;
   return get('SELECT * FROM bot_msgs WHERE message_id = ?', String(mid));
 }
@@ -338,19 +344,26 @@ async function handleCallback(update) {
   const [kind, a, b] = payload.split(':');
   let toast;
   try {
-    if (userId && ownerId() && userId !== String(ownerId())) throw new Error('Это не владелец.');
+    // Only the owner acts on the buttons: they send answers to other people and
+    // start sessions. Without a paired owner nobody may press anything.
+    const owner = ownerId();
+    if (!owner) throw new Error('Бот ещё не привязан к владельцу.');
+    if (!userId || userId !== String(owner)) throw new Error('Это не владелец.');
+    // The original message can be gone by the time the button is pressed.
+    const mid = messageId(update.message);
+    if (!mid) throw new Error('Сообщение с кнопкой уже удалено.');
     if (kind === 'n') {
       const s = await screen(a);
-      await edit(messageId(update.message), s.text, s.kb);
+      await edit(mid, s.text, s.kb);
     } else if (kind === 'c') {
       const item = getItem(Number(a));
       if (item) {
         const card = inboxCard(item, 'view');
-        await edit(messageId(update.message), card.text, card.kb);
+        await edit(mid, card.text, card.kb);
       }
     } else if (kind === 's') {
       const s = projectScreen(Number(a));
-      await edit(messageId(update.message), s.text, s.kb);
+      await edit(mid, s.text, s.kb);
     } else if (kind === 'sel' || kind === 'p') {
       kvSet('bot_project', Number(a));
       toast = `Команды идут в «${currentProject().name}»`;
@@ -360,15 +373,15 @@ async function handleCallback(update) {
       bus.change('project', Number(a));
       toast = 'Следующее сообщение начнёт новую сессию';
     } else if (kind === 'f') {
-      await forwardItem(Number(a), { projectId: Number(b) });
+      await forwardItem(Number(a), { projectId: Number(b), approved: true });
       toast = `Отправил в «${get('SELECT name FROM projects WHERE id = ?', Number(b))?.name}»`;
       const card = inboxCard(getItem(Number(a)), 'view');
-      await edit(messageId(update.message), card.text, card.kb);
+      await edit(mid, card.text, card.kb);
     } else if (kind === 'pick') {
       const kb = new MaxKeyboard();
       for (const p of all('SELECT id, name FROM projects ORDER BY is_default DESC, name')) kb.text(p.name.slice(0, 30), `f:${a}:${p.id}`).row();
       kb.text('← Назад', `c:${a}`);
-      await edit(messageId(update.message), cardOrKeep(update.message), kb);
+      await edit(mid, cardOrKeep(update.message), kb);
     } else if (kind === 'tk') {
       const item = getItem(Number(a));
       const p = currentProject();
@@ -381,11 +394,11 @@ async function handleCallback(update) {
       const item = await replyItem(Number(a));
       toast = `Ответил ${item.name}`;
       const card = inboxCard(getItem(Number(a)), 'view');
-      await edit(messageId(update.message), card.text, card.kb);
+      await edit(mid, card.text, card.kb);
     } else if (kind === 'i') {
       ignoreItem(Number(a));
       const card = inboxCard(getItem(Number(a)), 'view');
-      await edit(messageId(update.message), card.text, card.kb);
+      await edit(mid, card.text, card.kb);
     } else if (kind === 'x') {
       stopRun(Number(a));
       toast = 'Остановлено';
@@ -396,31 +409,31 @@ async function handleCallback(update) {
       const t = get('SELECT * FROM tasks WHERE id = ?', Number(a));
       if (t) updateTask(t.id, { enabled: t.enabled ? 0 : 1 });
       const s = await screen('tasks');
-      await edit(messageId(update.message), s.text, s.kb);
+      await edit(mid, s.text, s.kb);
     } else if (kind === 'soc') {
       refreshReport();
       toast = 'Собираю сводку, 1–3 минуты';
       const s = await screen('soc');
-      await edit(messageId(update.message), s.text, s.kb);
+      await edit(mid, s.text, s.kb);
     } else if (kind === 'rc') {
       const id = untok(a);
       if (!id) throw new Error('Кнопка устарела, открой «Сегодня» заново');
       await completeReminder(id);
       toast = 'Выполнено';
       const s = await screen('today');
-      await edit(messageId(update.message), s.text, s.kb);
+      await edit(mid, s.text, s.kb);
     } else if (kind === 'mem') {
       const items = listPending();
       for (const n of items) (a === 'ok' ? approvePending : rejectPending)(n.name);
       toast = a === 'ok' ? `Запомнил: ${items.length}` : `Отклонил: ${items.length}`;
       const m = memoryScreen();
-      await edit(messageId(update.message), m.text, m.kb);
+      await edit(mid, m.text, m.kb);
     } else if (kind === 'cpok' || kind === 'cpx' || kind === 'cpn' || kind === 'cpd') {
       toast = await contentCallback(kind, a);
     } else if (kind === 'sys') {
       if (a === 'stop') { stopAll(); toast = 'Всё остановлено'; } else { resumeAll(); toast = 'Автоматика включена'; }
       const s = await screen('sys');
-      await edit(messageId(update.message), s.text, s.kb);
+      await edit(mid, s.text, s.kb);
     }
     await maxApi()?.answerCallback(cb.callback_id, { notification: toast || undefined });
   } catch (e) {
@@ -471,6 +484,9 @@ export async function handleMaxUpdate(update) {
     const isOwner = ownerId() && userId === String(ownerId());
     if (isOwner && chatId) kvSet('owner_max_chat_id', chatId);
     if (!chatAllowed(chatId)) return;
+    // Our own message: an admin with read_all_messages sees them too, and a
+    // card about our own reply would start a loop.
+    if (userId && botUserId() && userId === String(botUserId())) return;
 
     const text = message?.body?.text || '';
     const attachments = message?.body?.attachments || [];
@@ -539,7 +555,6 @@ async function pollOnce() {
   const marker = kvGet('max_update_marker', null);
   const data = await client.getUpdates({ limit: 100, timeout: 25, marker: marker ?? undefined, types: 'message_created,message_callback,bot_started,bot_added,user_added' });
   const updates = Array.isArray(data?.updates) ? data.updates : [];
-  if (data?.marker !== undefined && data?.marker !== null) kvSet('max_update_marker', data.marker);
   for (const update of updates) {
     try {
       await handleMaxUpdate(update);
@@ -547,6 +562,10 @@ async function pollOnce() {
       addLog('error', `Событие MAX: ${e.message.slice(0, 200)}`);
     }
   }
+  // The marker is saved only after the events are handled: MAX counts every
+  // update before the marker as read, so saving it earlier would drop the
+  // events of a run that crashed halfway through.
+  if (data?.marker !== undefined && data?.marker !== null) kvSet('max_update_marker', data.marker);
   if (updates.length) addLog('system', `MAX: получено событий ${updates.length}`);
 }
 
@@ -593,6 +612,8 @@ export async function startBot() {
     const me = await client.getMe();
     botState.status = 'running';
     botState.username = me?.username || null;
+    // The id of the bot itself: its own messages must not become incoming cards.
+    if (me?.user_id) kvSet('max_bot_id', String(me.user_id));
     setMaxState({ mode: config.max.longPolling ? 'polling' : 'webhook', connected: true, account: me?.username ? `@${me.username}` : null, error: null });
     addLog('system', `Бот MAX ${me?.username ? `@${me.username}` : ''} запущен`);
   } catch (e) {

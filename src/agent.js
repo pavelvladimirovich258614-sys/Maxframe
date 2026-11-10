@@ -45,8 +45,7 @@ const MAINFRAME_PROMPT = `
 
 // Tools an untrusted incoming message may not use. The text of a message from
 // another person is data, not an instruction: such a session may not publish,
-// schedule, send mail or take over the computer. Replies to people go through
-// the owner.
+// schedule or send mail. Replies to people go through the owner.
 const INBOX_BLOCKED = new Set([
   'mcp__mainframe__create_cron_task',
   'mcp__mainframe__linkedin_post',
@@ -58,6 +57,11 @@ const INBOX_BLOCKED = new Set([
 const INBOX_BLOCKED_PREFIX = ['mcp__computer__', 'mcp__browser__'];
 
 const isBlocked = (name) => INBOX_BLOCKED.has(name) || INBOX_BLOCKED_PREFIX.some((p) => name.startsWith(p));
+
+// A message that went into a session without the owner reading it (AUTO_FORWARD)
+// may not touch the machine at all: no shell, no browser, no computer. The
+// owner has to press the button first, and then the session works as usual.
+export const isUnattendedBlocked = (name, tool) => Boolean(tool?.dangerous) || INBOX_BLOCKED_PREFIX.some((p) => name.startsWith(p));
 
 const AUTH_RE = /Failed to authenticate|OAuth session expired|login reached its time limit|Invalid API key|401|403|unauthorized|invalid api key/i;
 
@@ -230,7 +234,9 @@ async function execute(runId) {
     }
 
     tools = await buildTools({ cwd: project.cwd, remote: remoteFor(project.cwd) });
-    const blocked = r.origin === 'inbox';
+    const blocked = r.origin === 'inbox' || r.origin === 'inbox-auto';
+    // The message went into the session on its own: nobody read it before.
+    const unattended = r.origin === 'inbox-auto';
     const allowed = [...tools.values()].filter((t) => permissionAllows(t, config.permissionMode));
     const definitions = allowed.map(toolDefinition);
 
@@ -282,6 +288,8 @@ async function execute(runId) {
           output = `Инструмент ${name} недоступен в этой сессии.`;
         } else if (blocked && isBlocked(name)) {
           output = `Инструмент ${name} заблокирован: это сообщение пришло от другого человека, а решение должен принять владелец.`;
+        } else if (unattended && isUnattendedBlocked(name, tool)) {
+          output = `Инструмент ${name} заблокирован: сообщение попало в сессию без владельца. Он должен сначала прочитать его и подтвердить перенос в проект.`;
         } else if (!permissionAllows(tool, config.permissionMode)) {
           output = `Инструмент ${name} недоступен при текущем режиме прав (${config.permissionMode}).`;
         } else {

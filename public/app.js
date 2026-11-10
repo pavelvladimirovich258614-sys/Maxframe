@@ -737,7 +737,7 @@ function socialOverview() {
   const d = S.data.social;
   const c = d.channel;
   const channel = c ? `<section class="card raised">
-      <div class="sec-title">${icon('send')}${esc(c.title || 'Канал')}${c.username ? `<span class="faint">@${esc(c.username)}</span>` : ''}</div>
+      <div class="sec-title">${icon('send')}${esc(c.title || 'Канал')}${c.username ? `<span class="faint">@${esc(c.username)}</span>` : ''}${c.link ? `<a class="faint" href="${esc(c.link)}" data-max-link="${esc(c.link)}" target="_blank" rel="noopener">открыть</a>` : ''}</div>
       <div class="kpis">
         <div class="kpi"><span class="kpi-v">${num(c.subscribers)}${delta(c.subs_change_7d)}</span><span class="kpi-l">подписчиков</span></div>
         <div class="kpi"><span class="kpi-v">${num(c.avg_views)}</span><span class="kpi-l">просмотров на пост</span></div>

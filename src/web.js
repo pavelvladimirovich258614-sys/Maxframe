@@ -182,7 +182,8 @@ route('GET', '/api/inbox', ({ url }) => {
   const where = filter === 'open' ? "WHERE status IN ('new','routed','error','done','forwarded')" : '';
   return all(`SELECT * FROM inbox ${where} ORDER BY id DESC LIMIT 100`).map((i) => ({ ...i, decision: i.decision ? JSON.parse(i.decision) : null }));
 });
-route('POST', '/api/inbox/:id/forward', async ({ p, body }) => ({ runId: await forwardItem(Number(p.id), { projectId: body.project_id, task: typeof body.task === 'string' ? body.task.trim() : undefined }) }));
+// The owner pressed the button in the dashboard: the message is approved.
+route('POST', '/api/inbox/:id/forward', async ({ p, body }) => ({ runId: await forwardItem(Number(p.id), { projectId: body.project_id, task: typeof body.task === 'string' ? body.task.trim() : undefined, approved: true }) }));
 route('POST', '/api/inbox/:id/restore', ({ p }) => restoreItem(Number(p.id)));
 route('GET', '/api/inbox/:id/history', async ({ p }) => chatHistory(Number(p.id)));
 route('POST', '/api/inbox/:id/suggest', async ({ p, body }) => suggestReply(Number(p.id), String(body.hint || '').slice(0, 1000)));
